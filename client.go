@@ -24,11 +24,14 @@ var (
 )
 
 type StatterConfig struct {
+	Addr                 string        // localhost:8125
+	Prefix               string        // metrics prefix
 	Agent                string        // telegraf/datadog
 	EnvName              string        // dev/test/staging/prod
 	HostName             string        // hostname
 	StuckFunctionTimeout time.Duration // stuck time
 	MockingEnabled       bool          // whether to enable mock statter, which only produce logs
+	Disabled             bool          // whether to disable metrics completely
 }
 
 func (m *StatterConfig) BaseTags() []string {
@@ -82,7 +85,16 @@ func Disable() {
 	clientMux.Unlock()
 }
 
+func InitWithConfig(cfg *StatterConfig) error {
+	return Init(cfg.Addr, cfg.Prefix, cfg)
+}
+
 func Init(addr string, prefix string, cfg *StatterConfig) error {
+	if cfg.Disabled {
+		Disable()
+		return nil
+	}
+
 	config = checkConfig(cfg)
 	if config.MockingEnabled {
 		// init a mock statter instead of real statsd client
