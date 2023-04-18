@@ -43,6 +43,18 @@ func ReportFuncCallAndTiming(tags ...Tags) StopTimerFunc {
 	return reportTiming(tags...)
 }
 
+func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error) {
+	fn := CallerFuncName(1)
+	reportFunc(fn, "called", tags...)
+	stop := reportTiming(tags...)
+	return func(err *error) {
+		stop()
+		if err != nil && *err != nil {
+			ReportClosureFuncError(fn, tags...)
+		}
+	}
+}
+
 func ReportClosureFuncCall(name string, tags ...Tags) {
 	reportFunc(name, "called", tags...)
 }
