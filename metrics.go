@@ -61,7 +61,9 @@ func ReportFuncCallAndTimingCtx(ctx context.Context, tags ...Tags) (context.Cont
 }
 
 func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Context, StopTimerFunc) {
-	spanCtx, doneFn := ReportFuncCallAndTimingCtx(sdkCtx.Context(), tags...)
+	fn := CallerFuncName(1)
+	reportFunc(fn, "called", tags...)
+	spanCtx, doneFn := reportTiming(sdkCtx.Context(), tags...)
 	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
