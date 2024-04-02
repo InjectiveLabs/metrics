@@ -59,6 +59,7 @@ func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Contex
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
 	spanCtx, doneFn := reportTiming(sdkCtx.Context(), tags...)
+	log.Warningf("=== fn:\t%s\tctx:\t%v\n", fn, sdkCtx.Context())
 	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
@@ -113,7 +114,7 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 
 	var (
 		span    trace.Span
-		spanCtx context.Context
+		spanCtx = ctx
 	)
 	if tracer != nil {
 		spanCtx, span = tracer.Start(ctx, fn)
