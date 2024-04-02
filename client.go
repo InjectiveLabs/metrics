@@ -38,6 +38,7 @@ type StatterConfig struct {
 	StuckFunctionTimeout time.Duration // stuck time
 	MockingEnabled       bool          // whether to enable mock statter, which only produce logs
 	Disabled             bool          // whether to disable metrics completely
+	TracingEnabled       bool          // whether DataDog tracing should be enabled (via OpenTelemetry)
 }
 
 func (m *StatterConfig) BaseTags() []string {
@@ -81,7 +82,9 @@ func Close() {
 	if client == nil {
 		return
 	}
-	traceProvider.Shutdown()
+	if traceProvider != nil {
+		traceProvider.Shutdown()
+	}
 	client.Close()
 }
 
@@ -90,6 +93,7 @@ func Disable() {
 	clientMux.Lock()
 	client = newMockStatter(true)
 	clientMux.Unlock()
+	tracer = nil
 }
 
 func InitWithConfig(cfg *StatterConfig) error {
@@ -124,10 +128,6 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 			dogstatsd.WithWriteTimeout(time.Duration(10)*time.Second),
 			dogstatsd.WithTags(config.BaseTags()),
 		)
-		// OpenTelemetry tracing via DataDog provider
-		traceProvider = ddotel.NewTracerProvider()
-		otel.SetTracerProvider(traceProvider)
-		tracer = otel.Tracer("")
 
 	case TelegrafAgent:
 		statter, err = newTelegrafStatter(
@@ -148,6 +148,13 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 	clientMux.Lock()
 	client = statter
 	clientMux.Unlock()
+
+	// OpenTelemetry tracing via DataDog provider
+	if cfg.TracingEnabled {
+		traceProvider = ddotel.NewTracerProvider()
+		otel.SetTracerProvider(traceProvider)
+		tracer = otel.Tracer("")
+	}
 
 	return nil
 }
