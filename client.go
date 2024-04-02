@@ -124,6 +124,11 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 			dogstatsd.WithWriteTimeout(time.Duration(10)*time.Second),
 			dogstatsd.WithTags(config.BaseTags()),
 		)
+		// OpenTelemetry tracing via DataDog provider
+		traceProvider = ddotel.NewTracerProvider()
+		otel.SetTracerProvider(traceProvider)
+		tracer = otel.Tracer("")
+
 	case TelegrafAgent:
 		statter, err = newTelegrafStatter(
 			statsd.Address(addr),
@@ -143,11 +148,6 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 	clientMux.Lock()
 	client = statter
 	clientMux.Unlock()
-
-	// OpenTelemetry tracing via DataDog provider
-	traceProvider = ddotel.NewTracerProvider()
-	otel.SetTracerProvider(traceProvider)
-	tracer = otel.Tracer("")
 
 	return nil
 }

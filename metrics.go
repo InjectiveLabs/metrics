@@ -12,12 +12,7 @@ import (
 	log "github.com/xlab/suplog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-)
-
-type blockHeightKeyT string
-
-const (
-	blockHeightKey blockHeightKeyT = "height"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func ReportFunc(fn, action string, tags ...Tags) {
@@ -116,10 +111,16 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 	t := time.Now()
 	fn := CallerFuncName(2)
 
-	spanCtx, span := tracer.Start(ctx, fn)
-	for _, tags := range tags {
-		for k, v := range tags {
-			span.SetAttributes(attribute.String(k, v))
+	var (
+		span    trace.Span
+		spanCtx context.Context
+	)
+	if tracer != nil {
+		spanCtx, span = tracer.Start(ctx, fn)
+		for _, tags := range tags {
+			for k, v := range tags {
+				span.SetAttributes(attribute.String(k, v))
+			}
 		}
 	}
 
@@ -141,8 +142,10 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
 			log.WithError(err).Warningln("detected stuck function")
 			client.Incr("func.stuck", tagArray, 1)
-			span.SetStatus(codes.Error, "stuck")
-			span.End()
+			if span != nil {
+				span.SetStatus(codes.Error, "stuck")
+				span.End()
+			}
 		}
 	}(fn, t)
 
@@ -153,7 +156,9 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 		clientMux.RLock()
 		defer clientMux.RUnlock()
 		client.Timing("func.timing", d, tagArray, 1)
-		span.End()
+		if span != nil {
+			span.End()
+		}
 	}
 }
 
