@@ -8,6 +8,9 @@ import (
 	statsd "github.com/alexcesaro/statsd"
 	"github.com/pkg/errors"
 	log "github.com/xlab/suplog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
+	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
 )
 
 const (
@@ -21,6 +24,9 @@ var (
 	client    Statter
 	clientMux = new(sync.RWMutex)
 	config    *StatterConfig
+
+	traceProvider *ddotel.TracerProvider
+	tracer        trace.Tracer
 )
 
 type StatterConfig struct {
@@ -75,6 +81,7 @@ func Close() {
 	if client == nil {
 		return
 	}
+	traceProvider.Shutdown()
 	client.Close()
 }
 
@@ -136,6 +143,12 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 	clientMux.Lock()
 	client = statter
 	clientMux.Unlock()
+
+	// OpenTelemetry tracing via DataDog provider
+	traceProvider = ddotel.NewTracerProvider()
+	otel.SetTracerProvider(traceProvider)
+	tracer = otel.Tracer("")
+
 	return nil
 }
 

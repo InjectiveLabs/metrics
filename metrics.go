@@ -1,13 +1,23 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
 	"time"
 
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	log "github.com/xlab/suplog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+)
+
+type blockHeightKeyT string
+
+const (
+	blockHeightKey blockHeightKeyT = "height"
 )
 
 func ReportFunc(fn, action string, tags ...Tags) {
@@ -40,13 +50,25 @@ func ReportFuncCall(tags ...Tags) {
 func ReportFuncCallAndTiming(tags ...Tags) StopTimerFunc {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
-	return reportTiming(tags...)
+	_, stopFn := reportTiming(context.Background(), tags...)
+	return stopFn
+}
+
+func ReportFuncCallAndTimingCtx(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
+	fn := CallerFuncName(1)
+	reportFunc(fn, "called", tags...)
+	return reportTiming(ctx, tags...)
+}
+
+func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Context, StopTimerFunc) {
+	spanCtx, doneFn := ReportFuncCallAndTimingCtx(sdkCtx.Context(), tags...)
+	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
 func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error) {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
-	stop := reportTiming(tags...)
+	_, stop := reportTiming(context.Background(), tags...)
 	return func(err *error) {
 		stop()
 		if err != nil && *err != nil {
@@ -74,17 +96,30 @@ func reportFunc(fn, action string, tags ...Tags) {
 type StopTimerFunc func()
 
 func ReportFuncTiming(tags ...Tags) StopTimerFunc {
-	return reportTiming(tags...)
+	_, stopFn := reportTiming(context.Background(), tags...)
+	return stopFn
 }
 
-func reportTiming(tags ...Tags) StopTimerFunc {
+func ReportFuncTimingCtx(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
+	return reportTiming(ctx, tags...)
+}
+
+func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
 	clientMux.RLock()
 	defer clientMux.RUnlock()
+
 	if client == nil {
-		return func() {}
+		return ctx, func() {}
 	}
 	t := time.Now()
 	fn := CallerFuncName(2)
+
+	spanCtx, span := tracer.Start(ctx, fn)
+	for _, tags := range tags {
+		for k, v := range tags {
+			span.SetAttributes(attribute.String(k, v))
+		}
+	}
 
 	tagArray := JoinTags(tags...)
 	tagArray = append(tagArray, getSingleTag("func_name", fn))
@@ -104,17 +139,19 @@ func reportTiming(tags ...Tags) StopTimerFunc {
 			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
 			log.WithError(err).Warningln("detected stuck function")
 			client.Incr("func.stuck", tagArray, 1)
-
+			span.SetStatus(codes.Error, "stuck")
+			span.End()
 		}
 	}(fn, t)
 
-	return func() {
+	return spanCtx, func() {
 		d := time.Since(t)
 		close(doneC)
 
 		clientMux.RLock()
 		defer clientMux.RUnlock()
 		client.Timing("func.timing", d, tagArray, 1)
+		span.End()
 	}
 }
 
@@ -154,7 +191,6 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 		clientMux.RLock()
 		defer clientMux.RUnlock()
 		client.Timing("func.timing", d, tagArray, 1)
-
 	}
 }
 
@@ -183,7 +219,7 @@ func getFuncNameFromPtr(ptr uintptr) string {
 type Tags map[string]string
 
 func (t Tags) With(k, v string) Tags {
-	if t == nil || len(t) == 0 {
+	if len(t) == 0 {
 		return map[string]string{
 			k: v,
 		}
