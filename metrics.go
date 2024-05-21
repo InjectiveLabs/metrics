@@ -9,7 +9,6 @@ import (
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	log "github.com/xlab/suplog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -140,7 +139,7 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 			defer clientMux.RUnlock()
 
 			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
-			log.WithError(err).Warningln("detected stuck function")
+			fmt.Println(err)
 			client.Incr("func.stuck", tagArray, 1)
 			if span != nil {
 				span.SetStatus(codes.Error, "stuck")
@@ -185,7 +184,7 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 			defer clientMux.RUnlock()
 
 			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
-			log.WithError(err).Warningln("detected stuck function")
+			fmt.Println(err)
 			client.Incr("func.stuck", tagArray, 1)
 
 		}

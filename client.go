@@ -1,13 +1,13 @@
 package metrics
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	dogstatsd "github.com/DataDog/datadog-go/v5/statsd"
 	statsd "github.com/alexcesaro/statsd"
 	"github.com/pkg/errors"
-	log "github.com/xlab/suplog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
@@ -173,83 +173,44 @@ func checkConfig(cfg *StatterConfig) *StatterConfig {
 }
 
 func errHandler(err error) {
-	log.WithError(err).Errorln("statsd error")
+	fmt.Printf("statsd error, err: %v\n", err)
 }
 
 func newMockStatter(noop bool) Statter {
-	return &mockStatter{
-		noop: noop,
-		fields: log.Fields{
-			"module": "mock_statter",
-		},
-	}
+	return &mockStatter{}
 }
 
 type mockStatter struct {
-	fields log.Fields
-	noop   bool
 }
 
 func (s *mockStatter) Count(name string, value int64, tags []string, rate float64) error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("Bucket %s: %v", name, value)
 	return nil
 }
 
 func (s *mockStatter) Incr(name string, tags []string, rate float64) error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("Bucket %s", name)
 	return nil
 }
 
 func (s *mockStatter) Decr(name string, tags []string, rate float64) error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("Bucket %s", name)
 	return nil
 }
 
 func (s *mockStatter) Gauge(name string, value float64, tags []string, rate float64) error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("Bucket %s: %v", name, value)
 	return nil
 }
 
 func (s *mockStatter) Timing(name string, value time.Duration, tags []string, rate float64) error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("Bucket %s: %v", name, value)
 	return nil
 }
 
 func (s *mockStatter) Histogram(name string, value float64, tags []string, rate float64) error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("Bucket %s: %v", name, value)
 	return nil
 }
 
 func (s *mockStatter) Unique(bucket string, value string) error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("Bucket %s: %v", bucket, value)
 	return nil
 }
 
 func (s *mockStatter) Close() error {
-	if s.noop {
-		return nil
-	}
-	log.WithFields(log.WithFn(s.fields)).Debugf("closed at %s", time.Now())
 	return nil
 }
