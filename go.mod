@@ -1,8 +1,6 @@
 module github.com/InjectiveLabs/metrics
 
-go 1.21
-
-toolchain go1.22.3
+go 1.22
 
 require (
 	github.com/DataDog/datadog-go/v5 v5.3.0
