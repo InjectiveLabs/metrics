@@ -23,6 +23,15 @@ func ReportFuncError(tags ...Tags) {
 	reportFunc(fn, "error", tags...)
 }
 
+func ReportFuncDeferredError(tags ...Tags) func(err *error) {
+	fn := CallerFuncName(1)
+	return func(err *error) {
+		if err != nil && *err != nil {
+			ReportClosureFuncError(fn, tags...)
+		}
+	}
+}
+
 func ReportClosureFuncError(name string, tags ...Tags) {
 	reportFunc(name, "error", tags...)
 }
@@ -223,6 +232,19 @@ func getFuncNameFromPtr(ptr uintptr) string {
 }
 
 type Tags map[string]string
+
+func MergeTags(original Tags, src ...Tags) Tags {
+	dst := make(Tags)
+	for k, v := range original {
+		dst[k] = v
+	}
+	for _, tags := range src {
+		for k, v := range tags {
+			dst[k] = v
+		}
+	}
+	return dst
+}
 
 func (t Tags) With(k, v string) Tags {
 	if len(t) == 0 {
