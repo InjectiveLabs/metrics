@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"runtime"
 	"sync"
 	"time"
@@ -12,7 +14,9 @@ import (
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
+
 	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
+	dd_tracer "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
@@ -45,7 +49,6 @@ type StatterConfig struct {
 	Disabled             bool          // whether to disable metrics completely
 	TracingEnabled       bool          // whether DataDog tracing should be enabled (via OpenTelemetry)
 	ProfilingEnabled     bool          // whether Datadog profiling should be enabled
-
 }
 
 func (m *StatterConfig) BaseTags() []string {
@@ -137,8 +140,26 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 
 	// OpenTelemetry tracing via DataDog provider
 	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
-		traceProvider = ddotel.NewTracerProvider()
-		otel.SetTracerProvider(traceProvider)
+		traceProvider = ddotel.NewTracerProvider(
+			dd_tracer.WithHTTPClient(&http.Client{
+				// We copy the transport to avoid using the default one, as it might be
+				// augmented with tracing and we don't want these calls to be recorded.
+				// See https://golang.org/pkg/net/http/#DefaultTransport .
+				Transport: &http.Transport{
+					Proxy: http.ProxyFromEnvironment,
+					DialContext: (&net.Dialer{
+						Timeout:   10 * time.Minute,
+						KeepAlive: 10 * time.Minute,
+						DualStack: true,
+					}).DialContext,
+					MaxIdleConns:          200,
+					IdleConnTimeout:       10 * time.Minute,
+					TLSHandshakeTimeout:   10 * time.Minute,
+					ExpectContinueTimeout: 10 * time.Minute,
+				},
+				Timeout: 10 * time.Minute,
+			}),
+		)
 		tracer = otel.Tracer("")
 	}
 
@@ -160,13 +181,29 @@ func setupProfiler(cfg *StatterConfig) error {
 		profiler.WithURL(fmt.Sprintf("http://%s/profiling/v1/input", cfg.Addr)),
 		profiler.WithService(cfg.Prefix),
 		profiler.WithEnv(cfg.EnvName),
+		profiler.WithHTTPClient(&http.Client{
+			// We copy the transport to avoid using the default one, as it might be
+			// augmented with tracing and we don't want these calls to be recorded.
+			// See https://golang.org/pkg/net/http/#DefaultTransport .
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Minute,
+					KeepAlive: 10 * time.Minute,
+					DualStack: true,
+				}).DialContext,
+				MaxIdleConns:          200,
+				IdleConnTimeout:       10 * time.Minute,
+				TLSHandshakeTimeout:   10 * time.Minute,
+				ExpectContinueTimeout: 10 * time.Minute,
+			},
+			Timeout: 10 * time.Minute,
+		}),
+		profiler.WithUploadTimeout(10*time.Minute),
 		profiler.WithVersion(cfg.Version),
 		profiler.WithTags("hostname:"+cfg.HostName),
 		profiler.WithProfileTypes(
 			profiler.CPUProfile,
-			profiler.HeapProfile,
-			profiler.MutexProfile,
-			profiler.BlockProfile,
 		),
 	)
 	if err != nil {
