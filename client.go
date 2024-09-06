@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"time"
@@ -156,6 +157,7 @@ func setupProfiler(cfg *StatterConfig) error {
 	runtime.SetBlockProfileRate(5)
 
 	err := profiler.Start(
+		profiler.WithURL(fmt.Sprintf("http://%s/profiling/v1/input", cfg.Addr)),
 		profiler.WithService(cfg.Prefix),
 		profiler.WithEnv(cfg.EnvName),
 		profiler.WithVersion(cfg.Version),
