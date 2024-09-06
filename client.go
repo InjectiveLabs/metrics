@@ -2,15 +2,17 @@ package metrics
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
 	dogstatsd "github.com/DataDog/datadog-go/v5/statsd"
-	statsd "github.com/alexcesaro/statsd"
+	"github.com/alexcesaro/statsd"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
+	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
 const (
@@ -35,10 +37,13 @@ type StatterConfig struct {
 	Agent                string        // telegraf/datadog
 	EnvName              string        // dev/test/staging/prod
 	HostName             string        // hostname
+	Version              string        // version
 	StuckFunctionTimeout time.Duration // stuck time
 	MockingEnabled       bool          // whether to enable mock statter, which only produce logs
 	Disabled             bool          // whether to disable metrics completely
 	TracingEnabled       bool          // whether DataDog tracing should be enabled (via OpenTelemetry)
+	ProfilingEnabled     bool          // whether Datadog profiling should be enabled
+
 }
 
 func (m *StatterConfig) BaseTags() []string {
@@ -150,12 +155,41 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 	clientMux.Unlock()
 
 	// OpenTelemetry tracing via DataDog provider
-	if cfg.TracingEnabled {
+	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
 		traceProvider = ddotel.NewTracerProvider()
 		otel.SetTracerProvider(traceProvider)
 		tracer = otel.Tracer("")
 	}
 
+	if cfg.Agent == DatadogAgent && cfg.ProfilingEnabled {
+		err = setupProfiler(cfg)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setupProfiler(cfg *StatterConfig) error {
+	runtime.SetMutexProfileFraction(5)
+	runtime.SetBlockProfileRate(5)
+
+	err := profiler.Start(
+		profiler.WithService(cfg.Prefix),
+		profiler.WithEnv(cfg.EnvName),
+		profiler.WithVersion(cfg.Version),
+		profiler.WithTags("hostname:"+cfg.HostName),
+		profiler.WithProfileTypes(
+			profiler.CPUProfile,
+			profiler.HeapProfile,
+			profiler.MutexProfile,
+			profiler.BlockProfile,
+		),
+	)
+	if err != nil {
+		return errors.Wrap(err, "profiler start failed")
+	}
 	return nil
 }
 
