@@ -12,11 +12,8 @@ import (
 	log "github.com/InjectiveLabs/suplog"
 	"github.com/alexcesaro/statsd"
 	"github.com/pkg/errors"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/trace"
 
-	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
-	dd_tracer "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
+	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
@@ -31,9 +28,6 @@ var (
 	client    Statter
 	clientMux = new(sync.RWMutex)
 	config    *StatterConfig
-
-	traceProvider *ddotel.TracerProvider
-	tracer        trace.Tracer
 )
 
 type StatterConfig struct {
@@ -140,27 +134,12 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 
 	// OpenTelemetry tracing via DataDog provider
 	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
-		traceProvider = ddotel.NewTracerProvider(
-			dd_tracer.WithHTTPClient(&http.Client{
-				// We copy the transport to avoid using the default one, as it might be
-				// augmented with tracing and we don't want these calls to be recorded.
-				// See https://golang.org/pkg/net/http/#DefaultTransport .
-				Transport: &http.Transport{
-					Proxy: http.ProxyFromEnvironment,
-					DialContext: (&net.Dialer{
-						Timeout:   10 * time.Minute,
-						KeepAlive: 10 * time.Minute,
-						DualStack: true,
-					}).DialContext,
-					MaxIdleConns:          200,
-					IdleConnTimeout:       10 * time.Minute,
-					TLSHandshakeTimeout:   10 * time.Minute,
-					ExpectContinueTimeout: 10 * time.Minute,
-				},
-				Timeout: 10 * time.Minute,
-			}),
+		rules := []tracer.SamplingRule{tracer.RateRule(1)}
+		tracer.Start(
+			tracer.WithSamplingRules(rules),
+			tracer.WithService(cfg.Prefix),
+			tracer.WithEnv(cfg.EnvName),
 		)
-		tracer = otel.Tracer("")
 	}
 
 	if cfg.Agent == DatadogAgent && cfg.ProfilingEnabled {
