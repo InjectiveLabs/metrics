@@ -1,12 +1,12 @@
 package metrics
 
 import (
-	"fmt"
 	"runtime"
 	"sync"
 	"time"
 
 	dogstatsd "github.com/DataDog/datadog-go/v5/statsd"
+	log "github.com/InjectiveLabs/suplog"
 	"github.com/alexcesaro/statsd"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
@@ -39,6 +39,7 @@ type StatterConfig struct {
 	HostName             string        // hostname
 	Version              string        // version
 	StuckFunctionTimeout time.Duration // stuck time
+	MockingThreshold     time.Duration // mocking threshold
 	MockingEnabled       bool          // whether to enable mock statter, which only produce logs
 	Disabled             bool          // whether to disable metrics completely
 	TracingEnabled       bool          // whether DataDog tracing should be enabled (via OpenTelemetry)
@@ -87,35 +88,15 @@ func Close() {
 	if client == nil {
 		return
 	}
-	if traceProvider != nil {
-		traceProvider.Shutdown()
-	}
 	client.Close()
 }
 
-func Disable() {
-	config = checkConfig(nil)
-	clientMux.Lock()
-	client = newMockStatter(true)
-	clientMux.Unlock()
-	tracer = nil
-}
-
-func InitWithConfig(cfg *StatterConfig) error {
-	return Init(cfg.Addr, cfg.Prefix, cfg)
-}
-
 func Init(addr string, prefix string, cfg *StatterConfig) error {
-	if cfg.Disabled {
-		Disable()
-		return nil
-	}
-
 	config = checkConfig(cfg)
 	if config.MockingEnabled {
 		// init a mock statter instead of real statsd client
 		clientMux.Lock()
-		client = newMockStatter(false)
+		client = newMockStatter(cfg)
 		clientMux.Unlock()
 		return nil
 	}
@@ -133,7 +114,6 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 			dogstatsd.WithWriteTimeout(time.Duration(10)*time.Second),
 			dogstatsd.WithTags(config.BaseTags()),
 		)
-
 	case TelegrafAgent:
 		statter, err = newTelegrafStatter(
 			statsd.Address(addr),
@@ -207,44 +187,5 @@ func checkConfig(cfg *StatterConfig) *StatterConfig {
 }
 
 func errHandler(err error) {
-	fmt.Printf("statsd error, err: %v\n", err)
-}
-
-func newMockStatter(noop bool) Statter {
-	return &mockStatter{}
-}
-
-type mockStatter struct {
-}
-
-func (s *mockStatter) Count(name string, value int64, tags []string, rate float64) error {
-	return nil
-}
-
-func (s *mockStatter) Incr(name string, tags []string, rate float64) error {
-	return nil
-}
-
-func (s *mockStatter) Decr(name string, tags []string, rate float64) error {
-	return nil
-}
-
-func (s *mockStatter) Gauge(name string, value float64, tags []string, rate float64) error {
-	return nil
-}
-
-func (s *mockStatter) Timing(name string, value time.Duration, tags []string, rate float64) error {
-	return nil
-}
-
-func (s *mockStatter) Histogram(name string, value float64, tags []string, rate float64) error {
-	return nil
-}
-
-func (s *mockStatter) Unique(bucket string, value string) error {
-	return nil
-}
-
-func (s *mockStatter) Close() error {
-	return nil
+	log.WithError(err).Errorln("statsd error")
 }
