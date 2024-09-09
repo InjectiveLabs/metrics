@@ -1,9 +1,6 @@
 package metrics
 
 import (
-	"fmt"
-	"net"
-	"net/http"
 	"runtime"
 	"sync"
 	"time"
@@ -134,11 +131,10 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 
 	// OpenTelemetry tracing via DataDog provider
 	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
-		rules := []tracer.SamplingRule{tracer.RateRule(1)}
 		tracer.Start(
-			tracer.WithSamplingRules(rules),
 			tracer.WithService(cfg.Prefix),
 			tracer.WithEnv(cfg.EnvName),
+			tracer.WithHostname(cfg.HostName),
 		)
 	}
 
@@ -157,32 +153,15 @@ func setupProfiler(cfg *StatterConfig) error {
 	runtime.SetBlockProfileRate(5)
 
 	err := profiler.Start(
-		profiler.WithURL(fmt.Sprintf("http://%s/profiling/v1/input", cfg.Addr)),
 		profiler.WithService(cfg.Prefix),
 		profiler.WithEnv(cfg.EnvName),
-		profiler.WithHTTPClient(&http.Client{
-			// We copy the transport to avoid using the default one, as it might be
-			// augmented with tracing and we don't want these calls to be recorded.
-			// See https://golang.org/pkg/net/http/#DefaultTransport .
-			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
-				DialContext: (&net.Dialer{
-					Timeout:   10 * time.Minute,
-					KeepAlive: 10 * time.Minute,
-					DualStack: true,
-				}).DialContext,
-				MaxIdleConns:          200,
-				IdleConnTimeout:       10 * time.Minute,
-				TLSHandshakeTimeout:   10 * time.Minute,
-				ExpectContinueTimeout: 10 * time.Minute,
-			},
-			Timeout: 10 * time.Minute,
-		}),
-		profiler.WithUploadTimeout(10*time.Minute),
+		profiler.WithHostname(cfg.HostName),
 		profiler.WithVersion(cfg.Version),
-		profiler.WithTags("hostname:"+cfg.HostName),
 		profiler.WithProfileTypes(
 			profiler.CPUProfile,
+			profiler.HeapProfile,
+			profiler.BlockProfile,
+			profiler.MutexProfile,
 		),
 	)
 	if err != nil {
