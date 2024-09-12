@@ -9,8 +9,10 @@ import (
 	log "github.com/InjectiveLabs/suplog"
 	"github.com/alexcesaro/statsd"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
-	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
+	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
 	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
@@ -25,6 +27,9 @@ var (
 	client    Statter
 	clientMux = new(sync.RWMutex)
 	config    *StatterConfig
+
+	traceProvider *ddotel.TracerProvider
+	tracer        trace.Tracer
 )
 
 type StatterConfig struct {
@@ -131,11 +136,9 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 
 	// OpenTelemetry tracing via DataDog provider
 	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
-		tracer.Start(
-			tracer.WithService(cfg.Prefix),
-			tracer.WithEnv(cfg.EnvName),
-			tracer.WithHostname(cfg.HostName),
-		)
+		traceProvider = ddotel.NewTracerProvider()
+		otel.SetTracerProvider(traceProvider)
+		tracer = otel.Tracer("")
 	}
 
 	if cfg.Agent == DatadogAgent && cfg.ProfilingEnabled {

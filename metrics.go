@@ -9,6 +9,7 @@ import (
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -122,6 +123,14 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 		span    trace.Span
 		spanCtx = ctx
 	)
+	if tracer != nil {
+		spanCtx, span = tracer.Start(ctx, fn)
+		for _, tags := range tags {
+			for k, v := range tags {
+				span.SetAttributes(attribute.String(k, v))
+			}
+		}
+	}
 
 	tagArray := JoinTags(tags...)
 	tagArray = append(tagArray, getSingleTag("func_name", fn))
