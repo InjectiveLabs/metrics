@@ -42,15 +42,15 @@ func IndexPriceUpdatesBatchSubmitted(size int, tags ...Tags) {
 	})
 }
 
-func Counter(metric string, value int64, tags ...Tags) {
+func Counter[T constraints.Integer](metric string, value T, tags ...Tags) {
 	CustomReport(func(s Statter, tagSpec []string) {
-		s.Count(metric, value, tagSpec, 1)
+		s.Count(metric, int64(value), tagSpec, 1)
 	}, tags...)
 }
 
 func CounterPositive[T constraints.Integer](metric string, value T, tags ...Tags) {
 	if value > 0 {
-		Counter(metric, int64(value), tags...)
+		Counter(metric, value, tags...)
 	}
 }
 
