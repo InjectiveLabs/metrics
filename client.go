@@ -220,9 +220,6 @@ type mockStatter struct {
 }
 
 func (s *mockStatter) Count(name string, value int64, tags []string, rate float64) error {
-	if s.threshold > 0 {
-		return nil
-	}
 	s.l.WithFields(s.withTagFields(tags)).Debugf("Count %s: %v", name, value)
 	return nil
 }
