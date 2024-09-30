@@ -9,6 +9,7 @@ import (
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/mixpanel/mixpanel-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -21,6 +22,15 @@ func ReportFunc(fn, action string, tags ...Tags) {
 func ReportFuncError(tags ...Tags) {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "error", tags...)
+}
+
+func ReportFuncDeferredError(tags ...Tags) func(err *error) {
+	fn := CallerFuncName(1)
+	return func(err *error) {
+		if err != nil && *err != nil {
+			ReportClosureFuncError(fn, tags...)
+		}
+	}
 }
 
 func ReportClosureFuncError(name string, tags ...Tags) {
@@ -59,6 +69,18 @@ func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Contex
 	reportFunc(fn, "called", tags...)
 	spanCtx, doneFn := reportTiming(sdkCtx.Context(), tags...)
 	return sdkCtx.WithContext(spanCtx), doneFn
+}
+
+func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(err *error) {
+	fn := CallerFuncName(1)
+	reportFunc(fn, "called", tags...)
+	_, stop := reportTiming(ctx, tags...)
+	return func(err *error) {
+		stop()
+		if err != nil && *err != nil {
+			ReportClosureFuncError(fn, tags...)
+		}
+	}
 }
 
 func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error) {
@@ -205,6 +227,25 @@ func CallerFuncName(skip int) string {
 	return getFuncNameFromPtr(pc)
 }
 
+func Track(ctx context.Context, events []*mixpanel.Event) error {
+	if mixPanelClient != nil {
+		err := mixPanelClient.Track(ctx, events)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func NewEvent(name string, distinctID string, properties map[string]any) *mixpanel.Event {
+	if mixPanelClient != nil {
+		return mixPanelClient.NewEvent(name, distinctID, properties)
+	}
+
+	return nil
+}
+
 func GetFuncName(i interface{}) string {
 	return getFuncNameFromPtr(reflect.ValueOf(i).Pointer())
 }
@@ -223,6 +264,19 @@ func getFuncNameFromPtr(ptr uintptr) string {
 }
 
 type Tags map[string]string
+
+func MergeTags(original Tags, src ...Tags) Tags {
+	dst := make(Tags)
+	for k, v := range original {
+		dst[k] = v
+	}
+	for _, tags := range src {
+		for k, v := range tags {
+			dst[k] = v
+		}
+	}
+	return dst
+}
 
 func (t Tags) With(k, v string) Tags {
 	if len(t) == 0 {
