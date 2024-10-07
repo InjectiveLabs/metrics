@@ -83,14 +83,14 @@ func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(e
 	}
 }
 
-func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error) {
+func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error, tags ...Tags) {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
 	_, stop := reportTiming(context.Background(), tags...)
-	return func(err *error) {
-		stop()
+	return func(err *error, stopTags ...Tags) {
+		stop(stopTags...)
 		if err != nil && *err != nil {
-			ReportClosureFuncError(fn, tags...)
+			ReportClosureFuncError(fn, MergeTags(MergeTags(nil, tags...), stopTags...))
 		}
 	}
 }
@@ -111,7 +111,7 @@ func reportFunc(fn, action string, tags ...Tags) {
 	client.Incr(fmt.Sprintf("func.%v", action), tagArray, 0.77)
 }
 
-type StopTimerFunc func()
+type StopTimerFunc func(tags ...Tags)
 
 func ReportFuncTiming(tags ...Tags) StopTimerFunc {
 	_, stopFn := reportTiming(context.Background(), tags...)
@@ -127,7 +127,7 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 	defer clientMux.RUnlock()
 
 	if client == nil {
-		return ctx, func() {}
+		return ctx, func(...Tags) {}
 	}
 	t := time.Now()
 	fn := CallerFuncName(2)
@@ -170,13 +170,15 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 		}
 	}(fn, t)
 
-	return spanCtx, func() {
+	return spanCtx, func(stopTags ...Tags) {
 		d := time.Since(t)
 		close(doneC)
 
+		stopTagArray := append(tagArray, JoinTags(stopTags...)...)
+
 		clientMux.RLock()
 		defer clientMux.RUnlock()
-		client.Timing("func.timing", d, tagArray, 1)
+		client.Timing("func.timing", d, stopTagArray, 1)
 		if span != nil {
 			span.End()
 		}
@@ -187,7 +189,7 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 	clientMux.RLock()
 	defer clientMux.RUnlock()
 	if client == nil {
-		return func() {}
+		return func(...Tags) {}
 	}
 	t := time.Now()
 	tagArray := JoinTags(tags...)
@@ -212,13 +214,14 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 		}
 	}(name, t)
 
-	return func() {
+	return func(stopTags ...Tags) {
 		d := time.Since(t)
 		close(doneC)
+		stopTagArray := append(tagArray, JoinTags(stopTags...)...)
 
 		clientMux.RLock()
 		defer clientMux.RUnlock()
-		client.Timing("func.timing", d, tagArray, 1)
+		client.Timing("func.timing", d, stopTagArray, 1)
 	}
 }
 
