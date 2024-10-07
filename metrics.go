@@ -24,11 +24,11 @@ func ReportFuncError(tags ...Tags) {
 	reportFunc(fn, "error", tags...)
 }
 
-func ReportFuncDeferredError(tags ...Tags) func(err *error) {
+func ReportFuncDeferredError(tags ...Tags) func(err *error, tags ...Tags) {
 	fn := CallerFuncName(1)
-	return func(err *error) {
+	return func(err *error, stopTags ...Tags) {
 		if err != nil && *err != nil {
-			ReportClosureFuncError(fn, tags...)
+			ReportClosureFuncError(fn, MergeTags(MergeTags(nil, tags...), stopTags...))
 		}
 	}
 }
@@ -71,14 +71,15 @@ func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Contex
 	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
-func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(err *error) {
+func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(err *error, stopTags ...Tags) {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
 	_, stop := reportTiming(ctx, tags...)
-	return func(err *error) {
-		stop()
+	return func(err *error, stopTags ...Tags) {
+		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
+		stop(finalTags)
 		if err != nil && *err != nil {
-			ReportClosureFuncError(fn, tags...)
+			ReportClosureFuncError(fn, finalTags)
 		}
 	}
 }
@@ -88,9 +89,10 @@ func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error, tags ...Tags)
 	reportFunc(fn, "called", tags...)
 	_, stop := reportTiming(context.Background(), tags...)
 	return func(err *error, stopTags ...Tags) {
-		stop(stopTags...)
+		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
+		stop(finalTags)
 		if err != nil && *err != nil {
-			ReportClosureFuncError(fn, MergeTags(MergeTags(nil, tags...), stopTags...))
+			ReportClosureFuncError(fn, finalTags)
 		}
 	}
 }
