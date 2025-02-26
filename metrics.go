@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	log "github.com/InjectiveLabs/suplog"
 	"reflect"
 	"runtime"
 	"strings"
@@ -209,10 +210,8 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 			clientMux.RLock()
 			defer clientMux.RUnlock()
 
-			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
-			fmt.Println(err)
+			log.Warningf("detected stuck function: %s stuck for %v", name, time.Since(start))
 			client.Incr("func.stuck", tagArray, 1)
-
 		}
 	}(name, t)
 
