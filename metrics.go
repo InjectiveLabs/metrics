@@ -90,9 +90,9 @@ func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error, tags ...Tags)
 	reportFunc(fn, "called", tags...)
 	_, stop := reportTiming(context.Background(), tags...)
 	return func(err *error, stopTags ...Tags) {
-		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
-		stop(finalTags)
+		stop(stopTags...)
 		if err != nil && *err != nil {
+			finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
 			ReportClosureFuncError(fn, finalTags)
 		}
 	}
