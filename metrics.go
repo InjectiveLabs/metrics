@@ -3,12 +3,12 @@ package metrics
 import (
 	"context"
 	"fmt"
-	log "github.com/InjectiveLabs/suplog"
 	"reflect"
 	"runtime"
 	"strings"
 	"time"
 
+	log "github.com/InjectiveLabs/suplog"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/mixpanel/mixpanel-go"
 	"go.opentelemetry.io/otel/attribute"
@@ -55,27 +55,30 @@ func ReportFuncCall(tags ...Tags) {
 func ReportFuncCallAndTiming(tags ...Tags) StopTimerFunc {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
-	_, stopFn := reportTiming(context.Background(), tags...)
+	_, stopFn := reportTiming(context.Background(), fn, tags...)
 	return stopFn
 }
 
 func ReportFuncCallAndTimingCtx(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
-	return reportTiming(ctx, tags...)
+	return reportTiming(ctx, fn, tags...)
 }
 
 func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Context, StopTimerFunc) {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
-	spanCtx, doneFn := reportTiming(sdkCtx.Context(), tags...)
+	spanCtx, doneFn := reportTiming(sdkCtx.Context(), fn, tags...)
 	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
 func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(err *error, stopTags ...Tags) {
-	fn := CallerFuncName(1)
+	return ReportNamedFuncCallAndTimingCtxWithErr(ctx, CallerFuncName(1), tags...)
+}
+
+func ReportNamedFuncCallAndTimingCtxWithErr(ctx context.Context, fn string, tags ...Tags) func(err *error, stopTags ...Tags) {
 	reportFunc(fn, "called", tags...)
-	_, stop := reportTiming(ctx, tags...)
+	_, stop := reportTiming(ctx, fn, tags...)
 	return func(err *error, stopTags ...Tags) {
 		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
 		stop(finalTags)
@@ -87,8 +90,12 @@ func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(e
 
 func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error, tags ...Tags) {
 	fn := CallerFuncName(1)
+	return ReportNamedFuncCallAndTimingWithErr(fn, tags...)
+}
+
+func ReportNamedFuncCallAndTimingWithErr(fn string, tags ...Tags) func(err *error, tags ...Tags) {
 	reportFunc(fn, "called", tags...)
-	_, stop := reportTiming(context.Background(), tags...)
+	_, stop := reportTiming(context.Background(), fn, tags...)
 	return func(err *error, stopTags ...Tags) {
 		stop(stopTags...)
 		if err != nil && *err != nil {
@@ -117,15 +124,15 @@ func reportFunc(fn, action string, tags ...Tags) {
 type StopTimerFunc func(tags ...Tags)
 
 func ReportFuncTiming(tags ...Tags) StopTimerFunc {
-	_, stopFn := reportTiming(context.Background(), tags...)
+	_, stopFn := reportTiming(context.Background(), CallerFuncName(1), tags...)
 	return stopFn
 }
 
 func ReportFuncTimingCtx(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
-	return reportTiming(ctx, tags...)
+	return reportTiming(ctx, CallerFuncName(1), tags...)
 }
 
-func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
+func reportTiming(ctx context.Context, fn string, tags ...Tags) (context.Context, StopTimerFunc) {
 	clientMux.RLock()
 	defer clientMux.RUnlock()
 
@@ -133,7 +140,10 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 		return ctx, func(...Tags) {}
 	}
 	t := time.Now()
-	fn := CallerFuncName(2)
+
+	if fn == "" {
+		fn = CallerFuncName(2)
+	}
 
 	var (
 		span    trace.Span
