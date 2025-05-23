@@ -8,6 +8,58 @@ import (
 	"time"
 )
 
+func TestTiming(t *testing.T) {
+	var rec statterRecorder
+
+	_ = Init("", "", &StatterConfig{StuckFunctionTimeout: time.Minute, MockingEnabled: true})
+	oldClient := client
+	client = &rec
+	defer func() {
+		client = oldClient
+	}()
+
+	fx := func(t *testing.T) (err error, str string, num int, flag bool) {
+		defer func() {
+			assert.Len(t, rec.calls, 1)
+			assert.Equal(t, "Timing", rec.calls[0][0])
+			assert.Equal(t, "metric_name", rec.calls[0][1])
+			assert.GreaterOrEqual(t, rec.calls[0][2], 10*time.Millisecond)
+			assert.Len(t, rec.calls[0][3], 7) // tags
+			assert.ElementsMatch(t, []string{
+				"error=true",
+				"string_ref=something",
+				"number_ref=42",
+				"flag_ref=true",
+				"string=nothing",
+				"number=10",
+				"flag=false",
+			}, rec.calls[0][3]) // tags
+		}()
+
+		// Setting initial values, they should be overwritten when the function returns
+		err = nil
+		str = "nothing"
+		num = 10
+		flag = false
+
+		defer Timing("metric_name", ErrTag(&err))(
+			"string", str, "number", num, "flag",
+			flag, "string_ref", &str, "number_ref", &num, "flag_ref", &flag,
+		)
+		time.Sleep(time.Millisecond * 10)
+
+		// these values should be sent to the metrics
+		return errors.New("this error should be recorded"), "something", 42, true
+	}
+
+	err, str, num, flag := fx(t)
+	require.Error(t, err)
+	assert.Equal(t, "this error should be recorded", err.Error())
+	assert.Equal(t, "something", str)
+	assert.Equal(t, 42, num)
+	assert.True(t, flag)
+}
+
 func func1() string {
 	return func2()
 }
@@ -144,22 +196,22 @@ func (r *statterRecorder) Incr(name string, tags []string, rate float64) error {
 }
 
 func (r *statterRecorder) Decr(name string, tags []string, rate float64) error {
-	r.calls = append(r.calls, []interface{}{"Count", name, tags, rate})
+	r.calls = append(r.calls, []interface{}{"Decr", name, tags, rate})
 	return nil
 }
 
 func (r *statterRecorder) Gauge(name string, value float64, tags []string, rate float64) error {
-	r.calls = append(r.calls, []interface{}{"Count", name, value, tags, rate})
+	r.calls = append(r.calls, []interface{}{"Gauge", name, value, tags, rate})
 	return nil
 }
 
 func (r *statterRecorder) Timing(name string, value time.Duration, tags []string, rate float64) error {
-	r.calls = append(r.calls, []interface{}{"Count", name, value, tags, rate})
+	r.calls = append(r.calls, []interface{}{"Timing", name, value, tags, rate})
 	return nil
 }
 
 func (r *statterRecorder) Histogram(name string, value float64, tags []string, rate float64) error {
-	r.calls = append(r.calls, []interface{}{"Count", name, value, tags, rate})
+	r.calls = append(r.calls, []interface{}{"Histogram", name, value, tags, rate})
 	return nil
 }
 

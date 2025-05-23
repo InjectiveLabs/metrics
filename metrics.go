@@ -236,6 +236,86 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 	}
 }
 
+type TagsOption func(tt Tags)
+
+func ErrTag(err *error) TagsOption {
+	return func(tt Tags) {
+		if tt == nil {
+			tt = make(Tags)
+		}
+		tt["error"] = BoolTag(err != nil && *err != nil)
+	}
+}
+
+func Timing(name string, opts ...TagsOption) func(tags ...interface{}) {
+	start := time.Now()
+	return func(tags ...interface{}) {
+		tt := make(Tags)
+		for i := 0; i < len(tags); i += 2 {
+			if i+1 >= len(tags) {
+				break
+			}
+			k, ok := tags[i].(string)
+			if !ok {
+				continue
+			}
+
+			// special case for nil scalars
+			if tags[i+1] == nil {
+				tt[k] = "nil"
+				continue
+			}
+
+			var v string
+			switch x := tags[i+1].(type) {
+			case string:
+				v = x
+			case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+				v = fmt.Sprintf("%d", x)
+			case float32, float64:
+				v = fmt.Sprintf("%f", x)
+			case bool:
+				v = fmt.Sprintf("%v", x)
+			case *string:
+				v = *x
+			case *int:
+				v = fmt.Sprintf("%d", *x)
+			case *int8:
+				v = fmt.Sprintf("%d", *x)
+			case *int16:
+				v = fmt.Sprintf("%d", *x)
+			case *int32:
+				v = fmt.Sprintf("%d", *x)
+			case *int64:
+				v = fmt.Sprintf("%d", *x)
+			case *uint:
+				v = fmt.Sprintf("%d", *x)
+			case *uint8:
+				v = fmt.Sprintf("%d", *x)
+			case *uint16:
+				v = fmt.Sprintf("%d", *x)
+			case *uint32:
+				v = fmt.Sprintf("%d", *x)
+			case *uint64:
+				v = fmt.Sprintf("%d", *x)
+			case *float32:
+				v = fmt.Sprintf("%f", *x)
+			case *float64:
+				v = fmt.Sprintf("%f", *x)
+			case *bool:
+				v = fmt.Sprintf("%v", *x)
+			default:
+				continue
+			}
+			tt[k] = v
+		}
+		for _, opt := range opts {
+			opt(tt)
+		}
+		Timer(name, time.Since(start), tt)
+	}
+}
+
 func CallerFuncName(skip int) string {
 	pc, _, _, _ := runtime.Caller(1 + skip)
 	return getFuncNameFromPtr(pc)
