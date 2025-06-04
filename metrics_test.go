@@ -2,29 +2,22 @@ package metrics
 
 import (
 	"errors"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTiming(t *testing.T) {
-	var rec statterRecorder
-
-	_ = Init("", "", &StatterConfig{StuckFunctionTimeout: time.Minute, MockingEnabled: true})
-	oldClient := client
-	client = &rec
-	defer func() {
-		client = oldClient
-	}()
-
+	rec := record(t)
 	fx := func(t *testing.T) (err error, str string, num int, flag bool) {
 		defer func() {
 			assert.Len(t, rec.calls, 1)
 			assert.Equal(t, "Timing", rec.calls[0][0])
 			assert.Equal(t, "metric_name", rec.calls[0][1])
 			assert.GreaterOrEqual(t, rec.calls[0][2], 10*time.Millisecond)
-			assert.Len(t, rec.calls[0][3], 7) // tags
+			assert.Len(t, rec.calls[0][3], 9) // tags
 			assert.ElementsMatch(t, []string{
 				"error=true",
 				"string_ref=something",
@@ -33,6 +26,9 @@ func TestTiming(t *testing.T) {
 				"string=nothing",
 				"number=10",
 				"flag=false",
+				// From Tags
+				"foo=bar",
+				"baz=qux", // Overwritten by endTags
 			}, rec.calls[0][3]) // tags
 		}()
 
@@ -41,9 +37,11 @@ func TestTiming(t *testing.T) {
 		str = "nothing"
 		num = 10
 		flag = false
+		initialTags := Tags{"foo": "bar"}
+		endTags := Tags{"baz": "qux"} // overwrite baz pair from tag
 
-		defer Timing("metric_name", ErrTag(&err))(
-			"string", str, "number", num, "flag",
+		defer TimingWithErr("metric_name", initialTags, "baz", "fox")(&err,
+			"string", str, "number", num, "flag", endTags,
 			flag, "string_ref", &str, "number_ref", &num, "flag_ref", &flag,
 		)
 		time.Sleep(time.Millisecond * 10)
@@ -58,6 +56,175 @@ func TestTiming(t *testing.T) {
 	assert.Equal(t, "something", str)
 	assert.Equal(t, 42, num)
 	assert.True(t, flag)
+}
+
+func TestToString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected string
+		ok       bool
+	}{
+		{"string", "test", "test", true},
+		{"int", 42, "42", true},
+		{"int8", int8(42), "42", true},
+		{"int16", int16(42), "42", true},
+		{"int32", int32(42), "42", true},
+		{"int64", int64(42), "42", true},
+		{"uint", uint(42), "42", true},
+		{"uint8", uint8(42), "42", true},
+		{"uint16", uint16(42), "42", true},
+		{"uint32", uint32(42), "42", true},
+		{"uint64", uint64(42), "42", true},
+		{"float32", float32(42.42), "42.42", true},
+		{"float64", float64(42.42), "42.42", true},
+		{"bool", true, "true", true},
+		{"*string", func() *string { s := "test"; return &s }(), "test", true},
+		{"*int", func() *int { i := 42; return &i }(), "42", true},
+		{"*int8", func() *int8 { i := int8(42); return &i }(), "42", true},
+		{"*int16", func() *int16 { i := int16(42); return &i }(), "42", true},
+		{"*int32", func() *int32 { i := int32(42); return &i }(), "42", true},
+		{"*int64", func() *int64 { i := int64(42); return &i }(), "42", true},
+		{"*uint", func() *uint { u := uint(42); return &u }(), "42", true},
+		{"*uint8", func() *uint8 { u := uint8(42); return &u }(), "42", true},
+		{"*uint16", func() *uint16 { u := uint16(42); return &u }(), "42", true},
+		{"*uint32", func() *uint32 { u := uint32(42); return &u }(), "42", true},
+		{"*uint64", func() *uint64 { u := uint64(42); return &u }(), "42", true},
+		{"*float32", func() *float32 { f := float32(42.42); return &f }(), "42.42", true},
+		{"*float64", func() *float64 { f := float64(42.42); return &f }(), "42.42", true},
+		{"*bool", func() *bool { b := true; return &b }(), "true", true},
+		{"nil", nil, "nil", true},
+		{"unsupported type", struct{}{}, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, ok := ToString(tt.input)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func record(t *testing.T) *statterRecorder {
+	t.Helper()
+	var rec statterRecorder
+	_ = Init("", "", &StatterConfig{StuckFunctionTimeout: time.Minute, MockingEnabled: true})
+	oldClient := client
+	client = &rec
+	t.Cleanup(func() {
+		client = oldClient
+	})
+	return &rec
+
+}
+
+func TestCounter(t *testing.T) {
+	expectedTags := []string{"foo=bar", "baz=qux"}
+	assertSameResults := func(t *testing.T, rec *statterRecorder) {
+		assert.Len(t, rec.calls, 1)
+		assert.Equal(t, "Count", rec.calls[0][0])
+		assert.Equal(t, "my-counter", rec.calls[0][1])
+		assert.EqualValues(t, 5, rec.calls[0][2])
+		assert.Len(t, rec.calls[0][3], 2)
+		assert.ElementsMatch(t, expectedTags, rec.calls[0][3])
+	}
+
+	t.Run("using Tags", func(t *testing.T) {
+		rec := record(t)
+		Counter("my-counter", 5, Tags{"foo": "bar", "baz": "qux"})
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using multiple Tags", func(t *testing.T) {
+		rec := record(t)
+		Counter("my-counter", 5, Tags{"foo": "bar"}, Tags{"baz": "qux"})
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using pairs of key-value arguments", func(t *testing.T) {
+		rec := record(t)
+		Counter("my-counter", 5, "foo", "bar", "baz", "qux")
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using a combination of Tags and pairs of key-value arguments", func(t *testing.T) {
+		rec := record(t)
+		Counter("my-counter", 5, Tags{"foo": "bar"}, "baz", "qux")
+		assertSameResults(t, rec)
+	})
+}
+
+func TestIncr(t *testing.T) {
+	expectedTags := []string{"foo=bar", "baz=qux"}
+	assertSameResults := func(t *testing.T, rec *statterRecorder) {
+		assert.Len(t, rec.calls, 1)
+		assert.Equal(t, "Count", rec.calls[0][0])
+		assert.Equal(t, "my-gauge", rec.calls[0][1])
+		assert.EqualValues(t, 1, rec.calls[0][2])
+		assert.Len(t, rec.calls[0][3], 2)
+		assert.ElementsMatch(t, expectedTags, rec.calls[0][3])
+	}
+
+	t.Run("using Tags", func(t *testing.T) {
+		rec := record(t)
+		Incr("my-gauge", Tags{"foo": "bar", "baz": "qux"})
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using multiple Tags", func(t *testing.T) {
+		rec := record(t)
+		Incr("my-gauge", Tags{"foo": "bar"}, Tags{"baz": "qux"})
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using pairs of key-value arguments", func(t *testing.T) {
+		rec := record(t)
+		Incr("my-gauge", "foo", "bar", "baz", "qux")
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using a combination of Tags and pairs of key-value arguments", func(t *testing.T) {
+		rec := record(t)
+		Incr("my-gauge", Tags{"foo": "bar"}, "baz", "qux")
+		assertSameResults(t, rec)
+	})
+}
+
+func TestGauge(t *testing.T) {
+	expectedTags := []string{"foo=bar", "baz=qux"}
+	assertSameResults := func(t *testing.T, rec *statterRecorder) {
+		assert.Len(t, rec.calls, 1)
+		assert.Equal(t, "Gauge", rec.calls[0][0])
+		assert.Equal(t, "my-gauge", rec.calls[0][1])
+		assert.EqualValues(t, 5, rec.calls[0][2])
+		assert.Len(t, rec.calls[0][3], 2)
+		assert.ElementsMatch(t, expectedTags, rec.calls[0][3])
+	}
+
+	t.Run("using Tags", func(t *testing.T) {
+		rec := record(t)
+		Gauge("my-gauge", 5, Tags{"foo": "bar", "baz": "qux"})
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using multiple Tags", func(t *testing.T) {
+		rec := record(t)
+		Gauge("my-gauge", 5, Tags{"foo": "bar"}, Tags{"baz": "qux"})
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using pairs of key-value arguments", func(t *testing.T) {
+		rec := record(t)
+		Gauge("my-gauge", 5, "foo", "bar", "baz", "qux")
+		assertSameResults(t, rec)
+	})
+
+	t.Run("using a combination of Tags and pairs of key-value arguments", func(t *testing.T) {
+		rec := record(t)
+		Gauge("my-gauge", 5, Tags{"foo": "bar"}, "baz", "qux")
+		assertSameResults(t, rec)
+	})
 }
 
 func func1() string {
@@ -110,7 +277,7 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		assert.ElementsMatch(t, expectedTags, rec.calls[0][2])
 
 		expectedTags = []string{"foo=bar", "stop=error", "func_name=1"}
-		assert.Equal(t, "Count", rec.calls[1][0])
+		assert.Equal(t, "Timing", rec.calls[1][0])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
 		assert.ElementsMatch(t, expectedTags, rec.calls[1][3])
 
@@ -151,7 +318,7 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		assert.ElementsMatch(t, expectedTags, rec.calls[0][2])
 
 		expectedTags = []string{"foo=bar", "stop=error", "func_name=customFunc"}
-		assert.Equal(t, "Count", rec.calls[1][0])
+		assert.Equal(t, "Timing", rec.calls[1][0])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
 		assert.ElementsMatch(t, expectedTags, rec.calls[1][3])
 
