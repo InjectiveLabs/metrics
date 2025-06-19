@@ -250,6 +250,67 @@ func TestAddPairs(t *testing.T) {
 	}
 }
 
+func TestCombine(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []interface{}
+		expected Tags
+	}{
+		{
+			name:     "empty input",
+			input:    []interface{}{},
+			expected: Tags{},
+		},
+		{
+			name:     "single Tags map",
+			input:    []interface{}{Tags{"key1": "value1"}},
+			expected: Tags{"key1": "value1"},
+		},
+		{
+			name:     "multiple Tags maps",
+			input:    []interface{}{Tags{"key1": "value1"}, Tags{"key2": "value2"}},
+			expected: Tags{"key1": "value1", "key2": "value2"},
+		},
+		{
+			name:     "Tags map and key-value pairs",
+			input:    []interface{}{Tags{"key1": "value1"}, "key2", "value2"},
+			expected: Tags{"key1": "value1", "key2": "value2"},
+		},
+		{
+			name:     "key-value pairs only",
+			input:    []interface{}{"key1", "value1", "key2", "value2"},
+			expected: Tags{"key1": "value1", "key2": "value2"},
+		},
+		{
+			name:     "uneven key-value pairs",
+			input:    []interface{}{"key1", "value1", "key2"},
+			expected: Tags{"key1": "value1"},
+		},
+		{
+			name:     "nil value in key-value pairs",
+			input:    []interface{}{"key1", nil},
+			expected: Tags{"key1": "nil"},
+		},
+		{
+			name:     "unsupported type in input",
+			input:    []interface{}{"key1", struct{}{}},
+			expected: Tags{},
+		},
+		{
+			name:     "nested Tags map and key-value pairs",
+			input:    []interface{}{Tags{"key1": "value1"}, []interface{}{"key2", "value2"}},
+			expected: Tags{"key1": "value1", "key2": "value2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := Combine(tt.input...)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestGauge(t *testing.T) {
 	expectedTags := []string{"foo=bar", "baz=qux"}
 	assertSameResults := func(t *testing.T, rec *statterRecorder) {
