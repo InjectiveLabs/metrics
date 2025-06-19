@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -292,6 +293,54 @@ func MergeTags(original Tags, src ...Tags) Tags {
 	return dst
 }
 
+func addPairs(t Tags, tags ...interface{}) Tags {
+	if t == nil {
+		t = make(Tags)
+	}
+	for i := 0; i < len(tags); i += 2 {
+		if i+1 >= len(tags) {
+			break
+		}
+		k, ok := tags[i].(string)
+		if !ok {
+			continue
+		}
+
+		// special case for nil scalars
+		if tags[i+1] == nil {
+			t[k] = "nil"
+			continue
+		}
+
+		v, ok := ToString(tags[i+1])
+		if !ok {
+			continue
+		}
+		t[k] = v
+	}
+	return t
+}
+
+func combineAny(tags ...interface{}) Tags {
+	tt := make(Tags)
+	var pairs []interface{}
+	for _, x := range tags {
+		switch v := x.(type) {
+		case Tags:
+			for k, val := range v {
+				tt[k] = val
+			}
+		default:
+			pairs = append(pairs, v)
+		}
+	}
+	return addPairs(tt, pairs...)
+}
+
+func (t Tags) AddPairs(tags ...interface{}) Tags {
+	return addPairs(t, tags...)
+}
+
 func (t Tags) With(k, v string) Tags {
 	if len(t) == 0 {
 		return map[string]string{
@@ -346,4 +395,98 @@ func getSingleTag(key, value string) string {
 	}
 
 	return fmt.Sprintf("%s=%s", key, value)
+}
+
+// ToString converts various types to string in the most efficient (and verbose) way possible.
+func ToString(i interface{}) (v string, ok bool) {
+	ok = true
+	switch x := i.(type) {
+	case string:
+		v = x
+	case int:
+		v = strconv.Itoa(x)
+	case int8:
+		v = strconv.FormatInt(int64(x), 10)
+	case int16:
+		v = strconv.FormatInt(int64(x), 10)
+	case int32:
+		v = strconv.FormatInt(int64(x), 10)
+	case int64:
+		v = strconv.FormatInt(x, 10)
+	case uint:
+		v = strconv.FormatUint(uint64(x), 10)
+	case uint8:
+		v = strconv.FormatUint(uint64(x), 10)
+	case uint16:
+		v = strconv.FormatUint(uint64(x), 10)
+	case uint32:
+		v = strconv.FormatUint(uint64(x), 10)
+	case uint64:
+		v = strconv.FormatUint(x, 10)
+	case float32:
+		v = strconv.FormatFloat(float64(x), 'f', -1, 32)
+	case float64:
+		v = strconv.FormatFloat(x, 'f', -1, 64)
+	case *string:
+		if x != nil {
+			v = *x
+		}
+	case *int:
+		if x != nil {
+			v = strconv.FormatInt(int64(*x), 10)
+		}
+	case *int8:
+		if x != nil {
+			v = strconv.FormatInt(int64(*x), 10)
+		}
+	case *int16:
+		if x != nil {
+			v = strconv.FormatInt(int64(*x), 10)
+		}
+	case *int32:
+		if x != nil {
+			v = strconv.FormatInt(int64(*x), 10)
+		}
+	case *int64:
+		if x != nil {
+			v = strconv.FormatInt(*x, 10)
+		}
+	case *uint:
+		if x != nil {
+			v = strconv.FormatUint(uint64(*x), 10)
+		}
+	case *uint8:
+		if x != nil {
+			v = strconv.FormatUint(uint64(*x), 10)
+		}
+	case *uint16:
+		if x != nil {
+			v = strconv.FormatUint(uint64(*x), 10)
+		}
+	case *uint32:
+		if x != nil {
+			v = strconv.FormatUint(uint64(*x), 10)
+		}
+	case *uint64:
+		if x != nil {
+			v = strconv.FormatUint(*x, 10)
+		}
+	case *float32:
+		if x != nil {
+			v = strconv.FormatFloat(float64(*x), 'f', -1, 32)
+		}
+	case *float64:
+		if x != nil {
+			v = strconv.FormatFloat(*x, 'f', -1, 64)
+		}
+	case bool:
+		v = strconv.FormatBool(x)
+	case *bool:
+		v = strconv.FormatBool(*x)
+	case nil:
+		v = "nil"
+	default:
+		ok = false
+	}
+	return v, ok
 }

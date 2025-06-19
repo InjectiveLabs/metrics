@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"strconv"
 	"time"
 
@@ -42,20 +43,20 @@ func IndexPriceUpdatesBatchSubmitted(size int, tags ...Tags) {
 	})
 }
 
-func Counter[T constraints.Integer](metric string, value T, tags ...Tags) {
+func Counter[T constraints.Integer](metric string, value T, tags ...interface{}) {
 	CustomReport(func(s Statter, tagSpec []string) {
 		s.Count(metric, int64(value), tagSpec, 1)
-	}, tags...)
+	}, combineAny(tags...))
 }
 
-func CounterPositive[T constraints.Integer](metric string, value T, tags ...Tags) {
+func CounterPositive[T constraints.Integer](metric string, value T, tags ...interface{}) {
 	if value > 0 {
-		Counter(metric, value, tags...)
+		Counter(metric, value, combineAny(tags...))
 	}
 }
 
-func Incr(metric string, tags ...Tags) {
-	Counter(metric, 1, tags...)
+func Incr(metric string, tags ...interface{}) {
+	Counter(metric, 1, combineAny(tags...))
 }
 
 func Timer(metric string, value time.Duration, tags ...Tags) {
@@ -64,10 +65,34 @@ func Timer(metric string, value time.Duration, tags ...Tags) {
 	}, tags...)
 }
 
-func Gauge(metric string, value float64, tags ...Tags) {
+// Timing supports both Tags or pairs of key-value arguments.
+func Timing(metric string, initialTags ...interface{}) func(deferredTags ...interface{}) {
+	start := time.Now()
+	it := combineAny(initialTags...)
+	return func(deferredTags ...interface{}) {
+		dt := combineAny(deferredTags...)
+		Timer(metric, time.Since(start), MergeTags(it, dt))
+	}
+}
+
+// TimingWithErr supports both Tags or pairs of key-value arguments.
+func TimingWithErr(metric string, initialTags ...interface{}) func(err *error, deferredTags ...interface{}) {
+	stop := Timing(metric, initialTags...)
+	return func(err *error, deferredTags ...interface{}) {
+		dt := append(deferredTags, "error", BoolTag(err != nil && *err != nil))
+		stop(dt...)
+	}
+}
+
+// TimingCtxWithErr supports both Tags or pairs of key-value arguments.
+func TimingCtxWithErr(_ context.Context, metric string, initialTags ...interface{}) func(err *error, deferredTags ...interface{}) {
+	return TimingWithErr(metric, initialTags...)
+}
+
+func Gauge(metric string, value float64, tags ...interface{}) {
 	CustomReport(func(s Statter, tagSpec []string) {
 		s.Gauge(metric, value, tagSpec, 1)
-	}, tags...)
+	}, combineAny(tags...))
 }
 
 func BoolTag(b bool) string {
