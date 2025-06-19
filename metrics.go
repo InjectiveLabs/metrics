@@ -293,7 +293,7 @@ func MergeTags(original Tags, src ...Tags) Tags {
 	return dst
 }
 
-func addPairs(t Tags, tags ...interface{}) Tags {
+func AddPairs(t Tags, tags ...interface{}) Tags {
 	if t == nil {
 		t = make(Tags)
 	}
@@ -321,7 +321,7 @@ func addPairs(t Tags, tags ...interface{}) Tags {
 	return t
 }
 
-func combineAny(tags ...interface{}) Tags {
+func Combine(tags ...interface{}) Tags {
 	tt := make(Tags)
 	var pairs []interface{}
 	for _, x := range tags {
@@ -334,11 +334,11 @@ func combineAny(tags ...interface{}) Tags {
 			pairs = append(pairs, v)
 		}
 	}
-	return addPairs(tt, pairs...)
+	return AddPairs(tt, pairs...)
 }
 
 func (t Tags) AddPairs(tags ...interface{}) Tags {
-	return addPairs(t, tags...)
+	return AddPairs(t, tags...)
 }
 
 func (t Tags) With(k, v string) Tags {

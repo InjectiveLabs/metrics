@@ -191,6 +191,65 @@ func TestIncr(t *testing.T) {
 	})
 }
 
+func TestAddPairs(t *testing.T) {
+	tests := []struct {
+		name     string
+		initial  Tags
+		input    []interface{}
+		expected Tags
+	}{
+		{
+			name:     "empty tags",
+			initial:  nil,
+			input:    []interface{}{},
+			expected: Tags{},
+		},
+		{
+			name:     "single pair",
+			initial:  nil,
+			input:    []interface{}{"key", "value"},
+			expected: Tags{"key": "value"},
+		},
+		{
+			name:     "multiple pairs",
+			initial:  nil,
+			input:    []interface{}{"key1", "value1", "key2", "value2"},
+			expected: Tags{"key1": "value1", "key2": "value2"},
+		},
+		{
+			name:     "uneven tags",
+			initial:  nil,
+			input:    []interface{}{"key1", "value1", "key2"},
+			expected: Tags{"key1": "value1"},
+		},
+		{
+			name:     "nil value",
+			initial:  nil,
+			input:    []interface{}{"key1", nil},
+			expected: Tags{"key1": "nil"},
+		},
+		{
+			name:     "unsupported type",
+			initial:  nil,
+			input:    []interface{}{"key1", struct{}{}},
+			expected: Tags{},
+		},
+		{
+			name:     "merge with existing tags",
+			initial:  Tags{"existingKey": "existingValue"},
+			input:    []interface{}{"key1", "value1"},
+			expected: Tags{"existingKey": "existingValue", "key1": "value1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := AddPairs(tt.initial, tt.input...)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestGauge(t *testing.T) {
 	expectedTags := []string{"foo=bar", "baz=qux"}
 	assertSameResults := func(t *testing.T, rec *statterRecorder) {

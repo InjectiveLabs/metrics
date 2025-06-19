@@ -46,17 +46,17 @@ func IndexPriceUpdatesBatchSubmitted(size int, tags ...Tags) {
 func Counter[T constraints.Integer](metric string, value T, tags ...interface{}) {
 	CustomReport(func(s Statter, tagSpec []string) {
 		s.Count(metric, int64(value), tagSpec, 1)
-	}, combineAny(tags...))
+	}, Combine(tags...))
 }
 
 func CounterPositive[T constraints.Integer](metric string, value T, tags ...interface{}) {
 	if value > 0 {
-		Counter(metric, value, combineAny(tags...))
+		Counter(metric, value, Combine(tags...))
 	}
 }
 
 func Incr(metric string, tags ...interface{}) {
-	Counter(metric, 1, combineAny(tags...))
+	Counter(metric, 1, Combine(tags...))
 }
 
 func Timer(metric string, value time.Duration, tags ...Tags) {
@@ -68,9 +68,9 @@ func Timer(metric string, value time.Duration, tags ...Tags) {
 // Timing supports both Tags or pairs of key-value arguments.
 func Timing(metric string, initialTags ...interface{}) func(deferredTags ...interface{}) {
 	start := time.Now()
-	it := combineAny(initialTags...)
+	it := Combine(initialTags...)
 	return func(deferredTags ...interface{}) {
-		dt := combineAny(deferredTags...)
+		dt := Combine(deferredTags...)
 		Timer(metric, time.Since(start), MergeTags(it, dt))
 	}
 }
@@ -92,7 +92,7 @@ func TimingCtxWithErr(_ context.Context, metric string, initialTags ...interface
 func Gauge(metric string, value float64, tags ...interface{}) {
 	CustomReport(func(s Statter, tagSpec []string) {
 		s.Gauge(metric, value, tagSpec, 1)
-	}, combineAny(tags...))
+	}, Combine(tags...))
 }
 
 func BoolTag(b bool) string {
