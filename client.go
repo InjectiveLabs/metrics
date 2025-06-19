@@ -41,6 +41,7 @@ type StatterConfig struct {
 	EnvName              string        // dev/test/staging/prod
 	HostName             string        // hostname
 	Version              string        // version
+	DefaultTags          []interface{} // default tags for all metrics
 	StuckFunctionTimeout time.Duration // stuck time
 	MockingThreshold     time.Duration // mocking threshold
 	MockingEnabled       bool          // whether to enable mock statter, which only produce logs
@@ -52,6 +53,7 @@ type StatterConfig struct {
 }
 
 func (m *StatterConfig) BaseTags() []string {
+	defaultTags := Combine(m.DefaultTags...)
 	var baseTags []string
 
 	switch m.Agent {
@@ -63,6 +65,9 @@ func (m *StatterConfig) BaseTags() []string {
 		if len(config.HostName) > 0 {
 			baseTags = append(baseTags, "machine:"+config.HostName)
 		}
+		for k, v := range defaultTags {
+			baseTags = append(baseTags, k+":"+v)
+		}
 	// telegraf by default
 	default:
 		if len(config.EnvName) > 0 {
@@ -70,6 +75,9 @@ func (m *StatterConfig) BaseTags() []string {
 		}
 		if len(config.HostName) > 0 {
 			baseTags = append(baseTags, "machine", config.HostName)
+		}
+		for k, v := range defaultTags {
+			baseTags = append(baseTags, k, v)
 		}
 	}
 
