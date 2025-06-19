@@ -330,6 +330,8 @@ func Combine(tags ...interface{}) Tags {
 			for k, val := range v {
 				tt[k] = val
 			}
+		case []interface{}:
+			AddPairs(tt, v...)
 		default:
 			pairs = append(pairs, v)
 		}
