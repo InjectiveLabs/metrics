@@ -65,6 +65,13 @@ func Timer(metric string, value time.Duration, tags ...Tags) {
 	}, tags...)
 }
 
+// Histogram records a value in milliseconds.
+func Histogram(metric string, value time.Duration, tags ...Tags) {
+	CustomReport(func(s Statter, tagSpec []string) {
+		s.Histogram(metric, value.Seconds()*1000, tagSpec, 1)
+	}, tags...)
+}
+
 // Timing supports both Tags or pairs of key-value arguments.
 func Timing(metric string, initialTags ...interface{}) func(deferredTags ...interface{}) {
 	start := time.Now()
