@@ -61,6 +61,18 @@ func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Contex
 	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
+// FuncTiming reports func call and it's timing, usage: defer metrics.FuncTiming(&ctx, tags)()
+// This function overwrites the ctx with a copy with attached tracing span value.
+//
+// Uses runtime package to derive function name dynamically
+func FuncTiming(ctx *context.Context, tags ...Tags) StopTimerFunc {
+	fn := CallerFuncName(1)
+	reportFunc(fn, "called", tags...)
+	spanCtx, doneFn := reportTiming(*ctx, tags...)
+	*ctx = spanCtx
+	return doneFn
+}
+
 func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error) {
 	fn := CallerFuncName(1)
 	reportFunc(fn, "called", tags...)
@@ -78,8 +90,6 @@ func ReportClosureFuncCall(name string, tags ...Tags) {
 }
 
 func reportFunc(fn, action string, tags ...Tags) {
-	clientMux.RLock()
-	defer clientMux.RUnlock()
 	if client == nil {
 		return
 	}
@@ -101,9 +111,6 @@ func ReportFuncTimingCtx(ctx context.Context, tags ...Tags) (context.Context, St
 }
 
 func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
-	clientMux.RLock()
-	defer clientMux.RUnlock()
-
 	if client == nil {
 		return ctx, func() {}
 	}
@@ -134,10 +141,8 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 		select {
 		case <-doneC:
 			return
-		case <-timeout.C:
-			clientMux.RLock()
-			defer clientMux.RUnlock()
 
+		case <-timeout.C:
 			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
 			fmt.Println(err)
 			client.Incr("func.stuck", tagArray, 1)
@@ -151,9 +156,6 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 	return spanCtx, func() {
 		d := time.Since(t)
 		close(doneC)
-
-		clientMux.RLock()
-		defer clientMux.RUnlock()
 		client.Timing("func.timing", d, tagArray, 1)
 		if span != nil {
 			span.End()
@@ -162,8 +164,6 @@ func reportTiming(ctx context.Context, tags ...Tags) (context.Context, StopTimer
 }
 
 func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
-	clientMux.RLock()
-	defer clientMux.RUnlock()
 	if client == nil {
 		return func() {}
 	}
@@ -180,9 +180,6 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 		case <-doneC:
 			return
 		case <-timeout.C:
-			clientMux.RLock()
-			defer clientMux.RUnlock()
-
 			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
 			fmt.Println(err)
 			client.Incr("func.stuck", tagArray, 1)
@@ -193,9 +190,6 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 	return func() {
 		d := time.Since(t)
 		close(doneC)
-
-		clientMux.RLock()
-		defer clientMux.RUnlock()
 		client.Timing("func.timing", d, tagArray, 1)
 	}
 }

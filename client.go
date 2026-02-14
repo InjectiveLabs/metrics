@@ -1,33 +1,42 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	dogstatsd "github.com/DataDog/datadog-go/v5/statsd"
-	statsd "github.com/alexcesaro/statsd"
+	"github.com/alexcesaro/statsd"
 	"github.com/pkg/errors"
-	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
-	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
 )
 
 const (
-	DatadogAgent  = "datadog"
-	TelegrafAgent = "telegraf"
+	DatadogAgent       = "datadog"
+	TelegrafAgent      = "telegraf"
+	OpenTelemetryAgent = "opentelemetry"
 )
 
 var (
 	ErrUnsupportedAgent = errors.New("unsupported agent type")
 
-	client    Statter
-	clientMux = new(sync.RWMutex)
-	config    *StatterConfig
+	client Statter
+	config *StatterConfig
 
-	traceProvider *ddotel.TracerProvider
+	traceProvider *sdktrace.TracerProvider
 	tracer        trace.Tracer
 )
+
+type Statter interface {
+	Count(name string, value int64, tags []string, rate float64) error
+	Incr(name string, tags []string, rate float64) error
+	Decr(name string, tags []string, rate float64) error
+	Gauge(name string, value float64, tags []string, rate float64) error
+	Timing(name string, value time.Duration, tags []string, rate float64) error
+	Histogram(name string, value float64, tags []string, rate float64) error
+	Close() error
+}
 
 type StatterConfig struct {
 	Addr                 string        // localhost:8125
@@ -53,6 +62,13 @@ func (m *StatterConfig) BaseTags() []string {
 		if len(config.HostName) > 0 {
 			baseTags = append(baseTags, "machine:"+config.HostName)
 		}
+	case OpenTelemetryAgent:
+		if len(config.EnvName) > 0 {
+			baseTags = append(baseTags, "env="+config.EnvName)
+		}
+		if len(config.HostName) > 0 {
+			baseTags = append(baseTags, "machine="+config.HostName)
+		}
 	// telegraf by default
 	default:
 		if len(config.EnvName) > 0 {
@@ -66,33 +82,19 @@ func (m *StatterConfig) BaseTags() []string {
 	return baseTags
 }
 
-type Statter interface {
-	Count(name string, value int64, tags []string, rate float64) error
-	Incr(name string, tags []string, rate float64) error
-	Decr(name string, tags []string, rate float64) error
-	Gauge(name string, value float64, tags []string, rate float64) error
-	Timing(name string, value time.Duration, tags []string, rate float64) error
-	Histogram(name string, value float64, tags []string, rate float64) error
-	Close() error
-}
-
 func Close() {
-	clientMux.RLock()
-	defer clientMux.RUnlock()
-	if client == nil {
-		return
-	}
 	if traceProvider != nil {
-		traceProvider.Shutdown()
+		traceProvider.Shutdown(context.Background())
 	}
-	client.Close()
+
+	if client != nil {
+		client.Close()
+	}
 }
 
 func Disable() {
 	config = checkConfig(nil)
-	clientMux.Lock()
 	client = newMockStatter(true)
-	clientMux.Unlock()
 	tracer = nil
 }
 
@@ -109,9 +111,7 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 	config = checkConfig(cfg)
 	if config.MockingEnabled {
 		// init a mock statter instead of real statsd client
-		clientMux.Lock()
 		client = newMockStatter(false)
-		clientMux.Unlock()
 		return nil
 	}
 
@@ -137,23 +137,26 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 			statsd.TagsFormat(statsd.InfluxDB),
 			statsd.Tags(config.BaseTags()...),
 		)
+
+	case OpenTelemetryAgent:
+		statter, err = newOpenTelemetryStatter(addr, prefix, config.BaseTags())
+
 	default:
 		return ErrUnsupportedAgent
 	}
 
 	if err != nil {
-		err = errors.Wrap(err, "statsd init failed")
+		err = errors.Wrap(err, "metrics init failed")
 		return err
 	}
-	clientMux.Lock()
 	client = statter
-	clientMux.Unlock()
 
 	// OpenTelemetry tracing via DataDog provider
 	if cfg.TracingEnabled {
-		traceProvider = ddotel.NewTracerProvider()
-		otel.SetTracerProvider(traceProvider)
-		tracer = otel.Tracer("")
+		tracer, traceProvider, err = newOtelTracer(addr, prefix)
+		if err != nil {
+			return errors.Wrap(err, "tracing init failed")
+		}
 	}
 
 	return nil
