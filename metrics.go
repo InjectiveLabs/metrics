@@ -3,491 +3,252 @@ package metrics
 import (
 	"context"
 	"fmt"
-	"reflect"
-	"runtime"
-	"strconv"
-	"strings"
+	"sync"
 	"time"
 
-	log "github.com/InjectiveLabs/suplog"
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/mixpanel/mixpanel-go"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
-func ReportFunc(fn, action string, tags ...Tags) {
-	reportFunc(fn, action, tags...)
+type Config struct {
+	Endpoint         string        // gRPC OTEL receiver endpoint, e.g. localhost:4317 or set to empty to disable metrics completely
+	InsecureEndpoint bool          // whether to use TLS during Endpoint connection
+	ExportInterval   time.Duration // time interval between metric exports, default: 10s
+
+	MetricsEnabled bool // whether metrics collections should be enabled
+	TracingEnabled bool // whether tracing should be enabled
 }
 
-func ReportFuncError(tags ...Tags) {
-	fn := CallerFuncName(1)
-	reportFunc(fn, "error", tags...)
+// Metrics is a prodiver for telemetry meters.
+// Call Meter() to acquire a scoped meter for your instrumented piece of code.
+type Metrics struct {
+	cfg Config
+
+	meterProvider  *sdkmetric.MeterProvider
+	tracerProvider *sdktrace.TracerProvider
 }
 
-func ReportFuncDeferredError(tags ...Tags) func(err *error, tags ...Tags) {
-	fn := CallerFuncName(1)
-	return func(err *error, stopTags ...Tags) {
-		if err != nil && *err != nil {
-			ReportClosureFuncError(fn, MergeTags(MergeTags(nil, tags...), stopTags...))
-		}
-	}
+// Meter is a scoped metering instance and is used to send metrics
+// via different instruments acquired from it.
+// Meter has unqiue scope name associated with it and a set of base tags that
+// are attached to every metrics being sent through it.
+// You can derive SubMeter()-s from it, scope and base tags of one will be merged with the parent,
+// use it for sub-modules of your app.
+// It also exposes embedded raw OTEL Meter interface so you can use OTEL instruments directly (Int64Counter, etc.)
+type Meter struct {
+	metric.Meter
+
+	name     string
+	metrics  *Metrics
+	baseTags []TagAttr
+
+	counters   sync.Map // string => metric.Int64Counter
+	gauges     sync.Map // string => metric.Int64Gauge
+	histograms sync.Map // string => Int64Histogram
+
+	tracer trace.Tracer
 }
 
-func ReportClosureFuncError(name string, tags ...Tags) {
-	reportFunc(name, "error", tags...)
-}
+type StopFn func()
 
-func ReportFuncStatus(tags ...Tags) {
-	fn := CallerFuncName(1)
-	reportFunc(fn, "status", tags...)
-}
-
-func ReportClosureFuncStatus(name string, tags ...Tags) {
-	reportFunc(name, "status", tags...)
-}
-
-func ReportFuncCall(tags ...Tags) {
-	fn := CallerFuncName(1)
-	reportFunc(fn, "called", tags...)
-}
-
-func ReportFuncCallAndTiming(tags ...Tags) StopTimerFunc {
-	fn := CallerFuncName(1)
-	reportFunc(fn, "called", tags...)
-	_, stopFn := reportTiming(context.Background(), fn, tags...)
-	return stopFn
-}
-
-func ReportFuncCallAndTimingCtx(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
-	fn := CallerFuncName(1)
-	reportFunc(fn, "called", tags...)
-	return reportTiming(ctx, fn, tags...)
-}
-
-func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Context, StopTimerFunc) {
-	fn := CallerFuncName(1)
-	reportFunc(fn, "called", tags...)
-	spanCtx, doneFn := reportTiming(sdkCtx.Context(), fn, tags...)
-	return sdkCtx.WithContext(spanCtx), doneFn
-}
-
-// FuncTiming reports func call and it's timing, usage: defer metrics.FuncTiming(&ctx, tags)()
-// This function overwrites the ctx with a copy with attached tracing span value.
-//
-// Uses runtime package to derive function name dynamically
-func FuncTiming(ctx *context.Context, tags ...Tags) StopTimerFunc {
-	fn := CallerFuncName(1)
-	reportFunc(fn, "called", tags...)
-	spanCtx, doneFn := reportTiming(*ctx, tags...)
-	*ctx = spanCtx
-	return doneFn
-}
-
-func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(err *error, stopTags ...Tags) {
-	return ReportNamedFuncCallAndTimingCtxWithErr(ctx, CallerFuncName(1), tags...)
-}
-
-func ReportNamedFuncCallAndTimingCtxWithErr(ctx context.Context, fn string, tags ...Tags) func(err *error, stopTags ...Tags) {
-	reportFunc(fn, "called", tags...)
-	_, stop := reportTiming(ctx, fn, tags...)
-	return func(err *error, stopTags ...Tags) {
-		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
-		stop(finalTags)
-		if err != nil && *err != nil {
-			ReportClosureFuncError(fn, finalTags)
-		}
-	}
-}
-
-func ReportFuncCallAndTimingWithErr(tags ...Tags) func(err *error, tags ...Tags) {
-	fn := CallerFuncName(1)
-	return ReportNamedFuncCallAndTimingWithErr(fn, tags...)
-}
-
-func ReportNamedFuncCallAndTimingWithErr(fn string, tags ...Tags) func(err *error, tags ...Tags) {
-	reportFunc(fn, "called", tags...)
-	_, stop := reportTiming(context.Background(), fn, tags...)
-	return func(err *error, stopTags ...Tags) {
-		stop(stopTags...)
-		if err != nil && *err != nil {
-			finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
-			ReportClosureFuncError(fn, finalTags)
-		}
-	}
-}
-
-func ReportClosureFuncCall(name string, tags ...Tags) {
-	reportFunc(name, "called", tags...)
-}
-
-func reportFunc(fn, action string, tags ...Tags) {
-	if client == nil {
-		return
+// NewMetrics creates a metrics provider that can be used to spawn Meters from.
+// Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
+func NewMetrics(cfg Config) (*Metrics, error) {
+	ms := &Metrics{
+		cfg: cfg,
 	}
 
-	tagArray := JoinTags(tags...)
-	tagArray = append(tagArray, getSingleTag("func_name", fn))
-	client.Incr(fmt.Sprintf("func.%v", action), tagArray, 0.77)
-}
-
-type StopTimerFunc func(tags ...Tags)
-
-func ReportFuncTiming(tags ...Tags) StopTimerFunc {
-	_, stopFn := reportTiming(context.Background(), CallerFuncName(1), tags...)
-	return stopFn
-}
-
-func ReportFuncTimingCtx(ctx context.Context, tags ...Tags) (context.Context, StopTimerFunc) {
-	return reportTiming(ctx, CallerFuncName(1), tags...)
-}
-
-func reportTiming(ctx context.Context, fn string, tags ...Tags) (context.Context, StopTimerFunc) {
-	if client == nil {
-		return ctx, func(...Tags) {}
-	}
-	t := time.Now()
-
-	if fn == "" {
-		fn = CallerFuncName(2)
+	if ms.cfg.Endpoint == "" || (!ms.cfg.MetricsEnabled && !ms.cfg.TracingEnabled) {
+		return ms, nil
 	}
 
-	var (
-		span    trace.Span
-		spanCtx = ctx
-	)
-	if tracer != nil {
-		spanCtx, span = tracer.Start(ctx, fn)
-		for _, tags := range tags {
-			for k, v := range tags {
-				span.SetAttributes(attribute.String(k, v))
-			}
-		}
-	}
+	var err error
 
-	tagArray := JoinTags(tags...)
-	tagArray = append(tagArray, getSingleTag("func_name", fn))
-
-	doneC := make(chan struct{})
-	go func(name string, start time.Time) {
-		timeout := time.NewTimer(config.StuckFunctionTimeout)
-		defer timeout.Stop()
-
-		select {
-		case <-doneC:
-			return
-
-		case <-timeout.C:
-			err := fmt.Errorf("detected stuck function: %s stuck for %v", name, time.Since(start))
-			fmt.Println(err)
-			client.Incr("func.stuck", tagArray, 1)
-			if span != nil {
-				span.SetStatus(codes.Error, "stuck")
-				span.End()
-			}
-		}
-	}(fn, t)
-
-	return spanCtx, func(stopTags ...Tags) {
-		d := time.Since(t)
-		close(doneC)
-
-		stopTagArray := append(tagArray, JoinTags(stopTags...)...)
-
-		clientMux.RLock()
-		defer clientMux.RUnlock()
-		client.Timing("func.timing", d, stopTagArray, 1)
-
-		if span != nil {
-			span.End()
-		}
-	}
-}
-
-func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
-	if client == nil {
-		return func(...Tags) {}
-	}
-	t := time.Now()
-	tagArray := JoinTags(tags...)
-	tagArray = append(tagArray, getSingleTag("func_name", name))
-
-	doneC := make(chan struct{})
-	go func(name string, start time.Time) {
-		timeout := time.NewTimer(config.StuckFunctionTimeout)
-		defer timeout.Stop()
-
-		select {
-		case <-doneC:
-			return
-		case <-timeout.C:
-			log.Warningf("detected stuck function: %s stuck for %v", name, time.Since(start))
-			client.Incr("func.stuck", tagArray, 1)
-		}
-	}(name, t)
-
-	return func(stopTags ...Tags) {
-		d := time.Since(t)
-		close(doneC)
-		stopTagArray := append(tagArray, JoinTags(stopTags...)...)
-
-		client.Timing("func.timing", d, stopTagArray, 1)
-	}
-}
-
-func CallerFuncName(skip int) string {
-	pc, _, _, _ := runtime.Caller(1 + skip)
-	return getFuncNameFromPtr(pc)
-}
-
-func Track(ctx context.Context, events []*mixpanel.Event) error {
-	if mixPanelClient != nil {
-		err := mixPanelClient.Track(ctx, events)
+	if ms.cfg.MetricsEnabled {
+		ms.meterProvider, err = newMeterProvider(&cfg)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("can't create MetricsProvider: %w", err)
+		}
+	}
+
+	if ms.cfg.TracingEnabled {
+		ms.tracerProvider, err = newTracerProvider(&cfg)
+		if err != nil {
+			return nil, fmt.Errorf("can't create TracerProvider: %w", err)
+		}
+	}
+
+	return ms, nil
+}
+
+func newMeterProvider(cfg *Config) (*sdkmetric.MeterProvider, error) {
+	ctx := context.Background()
+
+	// Create the OTLP exporter
+	// It will automatically use OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and headers from env
+	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(cfg.Endpoint)}
+	if cfg.InsecureEndpoint {
+		opts = append(opts, otlpmetricgrpc.WithInsecure())
+	}
+	exporter, err := otlpmetricgrpc.New(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new otlp metric grpc exporter failed: %w", err)
+	}
+
+	// Create the resource with attributes from environment (OTEL_RESOURCE_ATTRIBUTES)
+	// and default host/process attributes
+	res, err := resource.New(ctx,
+		resource.WithFromEnv(),
+		resource.WithHost(),
+		resource.WithProcess(),
+		resource.WithOS(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("new resource failed: %w", err)
+	}
+
+	if cfg.ExportInterval == 0 {
+		cfg.ExportInterval = 10 * time.Second
+	}
+
+	// Create the MeterProvider with the exporter and resource
+	// Set a periodic reader to export metrics every 10 seconds
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(cfg.ExportInterval))),
+	)
+
+	return mp, nil
+}
+
+// NewMeter return a new meter instance, that has a defined unique scope and is used to provide metrics
+func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttr) (*Meter, error) {
+	m := &Meter{
+		name:     scopeName,
+		Meter:    ms.meterProvider.Meter(scopeName),
+		metrics:  ms,
+		baseTags: baseTags,
+	}
+
+	if ms.cfg.TracingEnabled {
+		m.tracer = ms.tracerProvider.Tracer(scopeName)
+	}
+
+	return m, nil
+}
+
+func (ms *Metrics) Shutdown() error {
+	if ms.cfg.MetricsEnabled {
+		if err := ms.meterProvider.Shutdown(context.Background()); err != nil {
+			return fmt.Errorf("can't shutdown MeterProvider: %w", err)
+		}
+	}
+	if ms.cfg.TracingEnabled {
+		if err := ms.tracerProvider.Shutdown(context.Background()); err != nil {
+			return fmt.Errorf("can't shutdown TracerProvider: %w", err)
 		}
 	}
 
 	return nil
 }
 
-func NewEvent(name string, distinctID string, properties map[string]any) *mixpanel.Event {
-	if mixPanelClient != nil {
-		return mixPanelClient.NewEvent(name, distinctID, properties)
+// SubMeter creates a new Meter derived from current MEter instance.
+// Scope name and base tags of sub-meter are then concatenated with parent's ones.
+func (m *Meter) SubMeter(subScopeName string, subBaseTags ...TagAttr) (*Meter, error) {
+	mergedBaseTags := append(append([]TagAttr{}, m.baseTags...), subBaseTags...)
+
+	subMeter := &Meter{
+		name:     subScopeName,
+		Meter:    m.metrics.meterProvider.Meter(fmt.Sprintf("%s.%s", m.name, subScopeName)),
+		metrics:  m.metrics,
+		baseTags: mergedBaseTags,
+		tracer:   m.tracer, // we re-use parent's tracer to have correct nested spans down from the root span
 	}
+
+	return subMeter, nil
+}
+
+func (m *Meter) getCounter(name string) (metric.Int64Counter, error) {
+	c, loaded := m.counters.Load(name)
+	if !loaded {
+		newC, err := m.Int64Counter(name)
+		if err != nil {
+			return nil, fmt.Errorf("can't create Int64Counter for Meter: %w", err)
+		}
+		c, _ = m.counters.LoadOrStore(name, newC)
+	}
+	return c.(metric.Int64Counter), nil
+}
+
+func (m *Meter) getGauge(name string) (metric.Int64Gauge, error) {
+	g, loaded := m.gauges.Load(name)
+	if !loaded {
+		newG, err := m.Int64Gauge(name)
+		if err != nil {
+			return nil, fmt.Errorf("can't create Int64Gauge for Meter: %w", err)
+		}
+		g, _ = m.gauges.LoadOrStore(name, newG)
+	}
+	return g.(metric.Int64Gauge), nil
+}
+
+func (m *Meter) getHistogram(name string) (metric.Int64Histogram, error) {
+	h, loaded := m.histograms.Load(name)
+	if !loaded {
+		newH, err := m.Int64Histogram(name)
+		if err != nil {
+			return nil, fmt.Errorf("can't create Int64Histogram for Meter: %w", err)
+		}
+		h, _ = m.gauges.LoadOrStore(name, newH)
+	}
+	return h.(metric.Int64Histogram), nil
+}
+
+// Count adds an int64 to existing (or new) counter with the name.
+// Appends tags to Meter baseTags to submit them with the counter new value.
+func (m *Meter) Count(name string, numToAdd int64, tags ...TagAttr) error {
+	c, err := m.getCounter(name)
+	if err != nil {
+		return fmt.Errorf("can't get %s counter: %w", name, err)
+	}
+
+	c.Add(context.Background(), numToAdd, metric.WithAttributes(m.getMergedTags(tags...)...))
 
 	return nil
 }
 
-func GetFuncName(i interface{}) string {
-	return getFuncNameFromPtr(reflect.ValueOf(i).Pointer())
+// Gauge records new gauge int64 reading.
+// Appends tags to Meter baseTags to submit them with the gauge new value.
+func (m *Meter) Gauge(name string, value int64, tags ...TagAttr) error {
+	g, err := m.getGauge(name)
+	if err != nil {
+		return fmt.Errorf("can't get %s gauge: %w", name, err)
+	}
+
+	g.Record(context.Background(), value, metric.WithAttributes(m.getMergedTags(tags...)...))
+
+	return nil
 }
 
-func getFuncNameFromPtr(ptr uintptr) string {
-	fullName := runtime.FuncForPC(ptr).Name()
-	parts := strings.Split(fullName, "/")
-	if len(parts) == 0 {
-		return ""
+// Histogram records new value into set of values distributed over time, e.g. timer value in ms.
+// Appends tags to Meter baseTags to submit them with the gauge new value.
+func (m *Meter) Histogram(name string, value int64, tags ...TagAttr) error {
+	h, err := m.getHistogram(name)
+	if err != nil {
+		return fmt.Errorf("can't get %s histogram: %w", name, err)
 	}
-	nameParts := strings.Split(parts[len(parts)-1], ".")
-	if len(nameParts) == 0 {
-		return ""
-	}
-	return strings.TrimSuffix(nameParts[len(nameParts)-1], "-fm")
+
+	h.Record(context.Background(), value, metric.WithAttributes(m.getMergedTags(tags...)...))
+
+	return nil
 }
 
-type Tags map[string]string
-
-func MergeTags(original Tags, src ...Tags) Tags {
-	dst := make(Tags)
-	for k, v := range original {
-		dst[k] = v
-	}
-	for _, tags := range src {
-		for k, v := range tags {
-			dst[k] = v
-		}
-	}
-	return dst
-}
-
-func AddPairs(t Tags, tags ...interface{}) Tags {
-	if t == nil {
-		t = make(Tags)
-	}
-	for i := 0; i < len(tags); i += 2 {
-		if i+1 >= len(tags) {
-			break
-		}
-		k, ok := tags[i].(string)
-		if !ok {
-			continue
-		}
-
-		// special case for nil scalars
-		if tags[i+1] == nil {
-			t[k] = "nil"
-			continue
-		}
-
-		v, ok := ToString(tags[i+1])
-		if !ok {
-			continue
-		}
-		t[k] = v
-	}
-	return t
-}
-
-func Combine(tags ...interface{}) Tags {
-	tt := make(Tags)
-	var pairs []interface{}
-	for _, x := range tags {
-		switch v := x.(type) {
-		case Tags:
-			for k, val := range v {
-				tt[k] = val
-			}
-		case []interface{}:
-			AddPairs(tt, v...)
-		default:
-			pairs = append(pairs, v)
-		}
-	}
-	return AddPairs(tt, pairs...)
-}
-
-func (t Tags) AddPairs(tags ...interface{}) Tags {
-	return AddPairs(t, tags...)
-}
-
-func (t Tags) With(k, v string) Tags {
-	if len(t) == 0 {
-		return map[string]string{
-			k: v,
-		}
-	}
-	t[k] = v
-	return t
-}
-
-func joinTelegrafTags(tags ...Tags) []string {
-	if len(tags) == 0 {
-		return []string{}
-	}
-
-	tagArray := make([]string, len(tags[0]))
-	i := 0
-	for k, v := range tags[0] {
-		tag := fmt.Sprintf("%s=%s", k, v)
-		tagArray[i] = tag
-		i += 1
-	}
-	return tagArray
-}
-
-func joinDDTags(tags ...Tags) []string {
-	if len(tags) == 0 {
-		return []string{}
-	}
-	tagArray := make([]string, len(tags[0]))
-	i := 0
-	for k, v := range tags[0] {
-		tag := fmt.Sprintf("%s:%s", k, v)
-		tagArray[i] = tag
-		i += 1
-	}
-	return tagArray
-}
-
-// JoinTags decides how to join tags base on agent
-func JoinTags(tags ...Tags) []string {
-	if config.Agent == DatadogAgent {
-		return joinDDTags(tags...)
-	}
-
-	return joinTelegrafTags(tags...)
-}
-
-func getSingleTag(key, value string) string {
-	if config.Agent == DatadogAgent {
-		return fmt.Sprintf("%s:%s", key, value)
-	}
-
-	return fmt.Sprintf("%s=%s", key, value)
-}
-
-// ToString converts various types to string in the most efficient (and verbose) way possible.
-func ToString(i interface{}) (v string, ok bool) {
-	ok = true
-	switch x := i.(type) {
-	case string:
-		v = x
-	case int:
-		v = strconv.Itoa(x)
-	case int8:
-		v = strconv.FormatInt(int64(x), 10)
-	case int16:
-		v = strconv.FormatInt(int64(x), 10)
-	case int32:
-		v = strconv.FormatInt(int64(x), 10)
-	case int64:
-		v = strconv.FormatInt(x, 10)
-	case uint:
-		v = strconv.FormatUint(uint64(x), 10)
-	case uint8:
-		v = strconv.FormatUint(uint64(x), 10)
-	case uint16:
-		v = strconv.FormatUint(uint64(x), 10)
-	case uint32:
-		v = strconv.FormatUint(uint64(x), 10)
-	case uint64:
-		v = strconv.FormatUint(x, 10)
-	case float32:
-		v = strconv.FormatFloat(float64(x), 'f', -1, 32)
-	case float64:
-		v = strconv.FormatFloat(x, 'f', -1, 64)
-	case *string:
-		if x != nil {
-			v = *x
-		}
-	case *int:
-		if x != nil {
-			v = strconv.FormatInt(int64(*x), 10)
-		}
-	case *int8:
-		if x != nil {
-			v = strconv.FormatInt(int64(*x), 10)
-		}
-	case *int16:
-		if x != nil {
-			v = strconv.FormatInt(int64(*x), 10)
-		}
-	case *int32:
-		if x != nil {
-			v = strconv.FormatInt(int64(*x), 10)
-		}
-	case *int64:
-		if x != nil {
-			v = strconv.FormatInt(*x, 10)
-		}
-	case *uint:
-		if x != nil {
-			v = strconv.FormatUint(uint64(*x), 10)
-		}
-	case *uint8:
-		if x != nil {
-			v = strconv.FormatUint(uint64(*x), 10)
-		}
-	case *uint16:
-		if x != nil {
-			v = strconv.FormatUint(uint64(*x), 10)
-		}
-	case *uint32:
-		if x != nil {
-			v = strconv.FormatUint(uint64(*x), 10)
-		}
-	case *uint64:
-		if x != nil {
-			v = strconv.FormatUint(*x, 10)
-		}
-	case *float32:
-		if x != nil {
-			v = strconv.FormatFloat(float64(*x), 'f', -1, 32)
-		}
-	case *float64:
-		if x != nil {
-			v = strconv.FormatFloat(*x, 'f', -1, 64)
-		}
-	case bool:
-		v = strconv.FormatBool(x)
-	case *bool:
-		v = strconv.FormatBool(*x)
-	case nil:
-		v = "nil"
-	default:
-		ok = false
-	}
-	return v, ok
+// Func inrements number of times function was called as "func.called" counter.
+// Function name is stored in "func_name" tag.
+func (m *Meter) Func(fn string, tags ...TagAttr) {
+	m.Count("func.called", 1, append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
 }
