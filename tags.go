@@ -16,7 +16,11 @@ func Tag[V string | int64 | bool](k string, v V) TagAttr {
 	return TagAttr{}
 }
 
-func (m *Meter) getMergedTags(tags ...TagAttr) []TagAttr {
+func (m *meter) getMergedTags(tags ...TagAttr) []TagAttr {
+	if m == nil {
+		return nil
+	}
+
 	if len(tags) == 0 {
 		return m.baseTags
 	}

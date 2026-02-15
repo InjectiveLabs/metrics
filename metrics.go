@@ -30,6 +30,8 @@ type Metrics struct {
 
 	meterProvider  *sdkmetric.MeterProvider
 	tracerProvider *sdktrace.TracerProvider
+
+	disabled bool
 }
 
 // Meter is a scoped metering instance and is used to send metrics
@@ -39,7 +41,48 @@ type Metrics struct {
 // You can derive SubMeter()-s from it, scope and base tags of one will be merged with the parent,
 // use it for sub-modules of your app.
 // It also exposes embedded raw OTEL Meter interface so you can use OTEL instruments directly (Int64Counter, etc.)
-type Meter struct {
+type Meter interface {
+	metric.Meter
+
+	// SubMeter creates a new Meter derived from current MEter instance.
+	// Scope name and base tags of sub-meter are then concatenated with parent's ones.
+	SubMeter(subScopeName string, subBaseTags ...TagAttr) Meter
+
+	// Count adds an int64 to existing (or new) counter with the name.
+	// Appends tags to Meter baseTags to submit them with the counter new value.
+	Count(name string, numToAdd int64, tags ...TagAttr) error
+
+	// Gauge records new gauge int64 reading.
+	// Appends tags to Meter baseTags to submit them with the gauge new value.
+	Gauge(name string, value int64, tags ...TagAttr) error
+
+	// Histogram records new value into set of values distributed over time, e.g. timer value in ms.
+	// Appends tags to Meter baseTags to submit them with the gauge new value.
+	Histogram(name string, value int64, tags ...TagAttr) error
+
+	// Func inrements number of times function was called as "func.called" counter.
+	// Function name is stored in "func_name" tag.
+	Func(fn string, tags ...TagAttr)
+
+	// FuncTiming reports function call and execution time in ms.
+	// Fucntion name is stored as "func_name" tag.
+	// Uses "func.timing" histogram instrument.
+	// Usage: defer metrics.FuncTiming(&sdkCtx, "EndBlocker")()
+	//
+	// This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
+	// using ContextPtr() method
+	FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopFn
+
+	// FuncTimingCtx reports function call and execution time in ms.
+	// Fucntion name is stored as "func_name" tag.
+	// Uses "func.timing" histogram instrument.
+	// Usage: defer metrics.FuncTimingCtx(&ctx, "EndBlocker")()
+	//
+	// This function overwrites the ctx with a copy of it with trace span attached.
+	FuncTimingCtx(ctx *context.Context, fn string, tags ...TagAttr) StopFn
+}
+
+type meter struct {
 	metric.Meter
 
 	name     string
@@ -63,6 +106,7 @@ func NewMetrics(cfg Config) (*Metrics, error) {
 	}
 
 	if ms.cfg.Endpoint == "" || (!ms.cfg.MetricsEnabled && !ms.cfg.TracingEnabled) {
+		ms.disabled = true
 		return ms, nil
 	}
 
@@ -126,12 +170,21 @@ func newMeterProvider(cfg *Config) (*sdkmetric.MeterProvider, error) {
 }
 
 // NewMeter return a new meter instance, that has a defined unique scope and is used to provide metrics
-func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttr) (*Meter, error) {
-	m := &Meter{
+func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttr) (Meter, error) {
+	var m *meter
+
+	if ms.disabled {
+		return m, nil
+	}
+
+	m = &meter{
 		name:     scopeName,
-		Meter:    ms.meterProvider.Meter(scopeName),
 		metrics:  ms,
 		baseTags: baseTags,
+	}
+
+	if ms.cfg.MetricsEnabled {
+		m.Meter = ms.meterProvider.Meter(scopeName)
 	}
 
 	if ms.cfg.TracingEnabled {
@@ -158,21 +211,28 @@ func (ms *Metrics) Shutdown() error {
 
 // SubMeter creates a new Meter derived from current MEter instance.
 // Scope name and base tags of sub-meter are then concatenated with parent's ones.
-func (m *Meter) SubMeter(subScopeName string, subBaseTags ...TagAttr) (*Meter, error) {
+func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttr) Meter {
+	if m == nil {
+		return nil
+	}
+
 	mergedBaseTags := append(append([]TagAttr{}, m.baseTags...), subBaseTags...)
 
-	subMeter := &Meter{
+	subMeter := &meter{
 		name:     subScopeName,
-		Meter:    m.metrics.meterProvider.Meter(fmt.Sprintf("%s.%s", m.name, subScopeName)),
 		metrics:  m.metrics,
 		baseTags: mergedBaseTags,
 		tracer:   m.tracer, // we re-use parent's tracer to have correct nested spans down from the root span
 	}
 
-	return subMeter, nil
+	if m.metrics.cfg.MetricsEnabled {
+		subMeter.Meter = m.metrics.meterProvider.Meter(fmt.Sprintf("%s.%s", m.name, subScopeName))
+	}
+
+	return subMeter
 }
 
-func (m *Meter) getCounter(name string) (metric.Int64Counter, error) {
+func (m *meter) getCounter(name string) (metric.Int64Counter, error) {
 	c, loaded := m.counters.Load(name)
 	if !loaded {
 		newC, err := m.Int64Counter(name)
@@ -184,7 +244,7 @@ func (m *Meter) getCounter(name string) (metric.Int64Counter, error) {
 	return c.(metric.Int64Counter), nil
 }
 
-func (m *Meter) getGauge(name string) (metric.Int64Gauge, error) {
+func (m *meter) getGauge(name string) (metric.Int64Gauge, error) {
 	g, loaded := m.gauges.Load(name)
 	if !loaded {
 		newG, err := m.Int64Gauge(name)
@@ -196,7 +256,7 @@ func (m *Meter) getGauge(name string) (metric.Int64Gauge, error) {
 	return g.(metric.Int64Gauge), nil
 }
 
-func (m *Meter) getHistogram(name string) (metric.Int64Histogram, error) {
+func (m *meter) getHistogram(name string) (metric.Int64Histogram, error) {
 	h, loaded := m.histograms.Load(name)
 	if !loaded {
 		newH, err := m.Int64Histogram(name)
@@ -210,7 +270,11 @@ func (m *Meter) getHistogram(name string) (metric.Int64Histogram, error) {
 
 // Count adds an int64 to existing (or new) counter with the name.
 // Appends tags to Meter baseTags to submit them with the counter new value.
-func (m *Meter) Count(name string, numToAdd int64, tags ...TagAttr) error {
+func (m *meter) Count(name string, numToAdd int64, tags ...TagAttr) error {
+	if m == nil || m.Meter == nil {
+		return nil
+	}
+
 	c, err := m.getCounter(name)
 	if err != nil {
 		return fmt.Errorf("can't get %s counter: %w", name, err)
@@ -223,7 +287,11 @@ func (m *Meter) Count(name string, numToAdd int64, tags ...TagAttr) error {
 
 // Gauge records new gauge int64 reading.
 // Appends tags to Meter baseTags to submit them with the gauge new value.
-func (m *Meter) Gauge(name string, value int64, tags ...TagAttr) error {
+func (m *meter) Gauge(name string, value int64, tags ...TagAttr) error {
+	if m == nil || m.Meter == nil {
+		return nil
+	}
+
 	g, err := m.getGauge(name)
 	if err != nil {
 		return fmt.Errorf("can't get %s gauge: %w", name, err)
@@ -236,7 +304,11 @@ func (m *Meter) Gauge(name string, value int64, tags ...TagAttr) error {
 
 // Histogram records new value into set of values distributed over time, e.g. timer value in ms.
 // Appends tags to Meter baseTags to submit them with the gauge new value.
-func (m *Meter) Histogram(name string, value int64, tags ...TagAttr) error {
+func (m *meter) Histogram(name string, value int64, tags ...TagAttr) error {
+	if m == nil || m.Meter == nil {
+		return nil
+	}
+
 	h, err := m.getHistogram(name)
 	if err != nil {
 		return fmt.Errorf("can't get %s histogram: %w", name, err)
@@ -249,6 +321,10 @@ func (m *Meter) Histogram(name string, value int64, tags ...TagAttr) error {
 
 // Func inrements number of times function was called as "func.called" counter.
 // Function name is stored in "func_name" tag.
-func (m *Meter) Func(fn string, tags ...TagAttr) {
+func (m *meter) Func(fn string, tags ...TagAttr) {
+	if m == nil || m.Meter == nil {
+		return
+	}
+
 	m.Count("func.called", 1, append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
 }
