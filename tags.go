@@ -1,8 +1,13 @@
 package metrics
 
-import "go.opentelemetry.io/otel/attribute"
+import (
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+)
 
 type TagAttr = attribute.KeyValue
+
+const ServiceNameKey = string(semconv.ServiceNameKey)
 
 func Tag[V string | int64 | bool](k string, v V) TagAttr {
 	switch anyV := any(v).(type) {

@@ -18,7 +18,7 @@ type ContextPointer interface {
 	ContextPtr() *context.Context
 }
 
-func newTracerProvider(cfg *Config) (*sdktrace.TracerProvider, error) {
+func newTracerProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdktrace.TracerProvider, error) {
 	ctx := context.Background()
 
 	// Reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS from environment
@@ -37,6 +37,8 @@ func newTracerProvider(cfg *Config) (*sdktrace.TracerProvider, error) {
 		resource.WithHost(),
 		resource.WithOS(),
 		resource.WithProcess(),
+		resource.WithContainer(),
+		resource.WithAttributes(resourceAttributes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new resource failed: %w", err)

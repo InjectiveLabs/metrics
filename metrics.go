@@ -102,7 +102,7 @@ type StopFn func()
 
 // NewMetrics creates a metrics provider that can be used to spawn Meters from.
 // Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
-func NewMetrics(cfg Config) (*Metrics, error) {
+func NewMetrics(cfg Config, resourceAttributes ...TagAttr) (*Metrics, error) {
 	ms := &Metrics{
 		cfg: cfg,
 	}
@@ -115,14 +115,14 @@ func NewMetrics(cfg Config) (*Metrics, error) {
 	var err error
 
 	if ms.cfg.MetricsEnabled {
-		ms.meterProvider, err = newMeterProvider(&cfg)
+		ms.meterProvider, err = newMeterProvider(&cfg, resourceAttributes...)
 		if err != nil {
 			return nil, fmt.Errorf("can't create MetricsProvider: %w", err)
 		}
 	}
 
 	if ms.cfg.TracingEnabled {
-		ms.tracerProvider, err = newTracerProvider(&cfg)
+		ms.tracerProvider, err = newTracerProvider(&cfg, resourceAttributes...)
 		if err != nil {
 			return nil, fmt.Errorf("can't create TracerProvider: %w", err)
 		}
@@ -131,7 +131,7 @@ func NewMetrics(cfg Config) (*Metrics, error) {
 	return ms, nil
 }
 
-func newMeterProvider(cfg *Config) (*sdkmetric.MeterProvider, error) {
+func newMeterProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdkmetric.MeterProvider, error) {
 	ctx := context.Background()
 
 	// Create the OTLP exporter
@@ -152,6 +152,8 @@ func newMeterProvider(cfg *Config) (*sdkmetric.MeterProvider, error) {
 		resource.WithHost(),
 		resource.WithProcess(),
 		resource.WithOS(),
+		resource.WithContainer(),
+		resource.WithAttributes(resourceAttributes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new resource failed: %w", err)
