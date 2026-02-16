@@ -12,7 +12,8 @@ import (
 )
 
 // ContextPointer is needed to accomodate for any context.Context wrapper (mainly sdk.Context)
-// that can-not be directly referenced by this package
+// to pull internally stored context.Context and replace it, since we can not reference sdk types
+// and we can not replace sdk.Context itself due to messy wrapping / unwrapping SDK logic.
 type ContextPointer interface {
 	ContextPtr() *context.Context
 }
@@ -61,18 +62,22 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopF
 		return func() {}
 	}
 
-	return m.FuncTimingCtx(ctx.ContextPtr(), fn, tags...)
+	ctxPtr := ctx.ContextPtr()
+	spanCtx, stop := m.FuncTimingCtx(*ctxPtr, fn, tags...)
+	*ctxPtr = spanCtx
+
+	return stop
 }
 
 // FuncTimingCtx reports function call and execution time in ms.
 // Fucntion name is stored as "func_name" tag.
 // Uses "func.timing" histogram instrument.
-// Usage: defer metrics.FuncTimingCtx(&ctx, "EndBlocker")()
-//
-// This function overwrites the ctx with a copy of it with trace span attached.
-func (m *meter) FuncTimingCtx(ctx *context.Context, fn string, tags ...TagAttr) StopFn {
+// Usage:
+// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")()
+// defer stop()
+func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn) {
 	if m == nil || m.Meter == nil {
-		return func() {}
+		return ctx, func() {}
 	}
 
 	m.Func(fn, tags...)
@@ -84,11 +89,10 @@ func (m *meter) FuncTimingCtx(ctx *context.Context, fn string, tags ...TagAttr) 
 	)
 
 	if m.tracer != nil {
-		spanCtx, traceSpan = m.tracer.Start(*ctx, fn, trace.WithAttributes(m.getMergedTags(tags...)...))
-		*ctx = spanCtx
+		spanCtx, traceSpan = m.tracer.Start(ctx, fn, trace.WithAttributes(m.getMergedTags(tags...)...))
 	}
 
-	return func() {
+	return spanCtx, func() {
 		d := time.Since(t)
 
 		if traceSpan != nil {

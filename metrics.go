@@ -76,10 +76,12 @@ type Meter interface {
 	// FuncTimingCtx reports function call and execution time in ms.
 	// Fucntion name is stored as "func_name" tag.
 	// Uses "func.timing" histogram instrument.
-	// Usage: defer metrics.FuncTimingCtx(&ctx, "EndBlocker")()
+	// Usage:
+	// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")()
+	// defer stop()
 	//
-	// This function overwrites the ctx with a copy of it with trace span attached.
-	FuncTimingCtx(ctx *context.Context, fn string, tags ...TagAttr) StopFn
+	// WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
+	FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn)
 }
 
 type meter struct {
