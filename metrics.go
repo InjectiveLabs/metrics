@@ -198,6 +198,10 @@ func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttr) (Meter, error
 	return m, nil
 }
 
+func NewNilMeter() Meter {
+	return (*meter)(nil)
+}
+
 func (ms *Metrics) Shutdown() error {
 	if ms.cfg.MetricsEnabled {
 		if err := ms.meterProvider.Shutdown(context.Background()); err != nil {
@@ -217,7 +221,7 @@ func (ms *Metrics) Shutdown() error {
 // Scope name and base tags of sub-meter are then concatenated with parent's ones.
 func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttr) Meter {
 	if m == nil {
-		return nil
+		return NewNilMeter()
 	}
 
 	mergedBaseTags := append(append([]TagAttr{}, m.baseTags...), subBaseTags...)
