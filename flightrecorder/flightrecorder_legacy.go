@@ -20,7 +20,7 @@ type traceRecorderLegacy struct {
 
 // NewTraceRecorder creates new trace flight recorder that will continuously record latest execution trace in a circullar buffer
 // and snapshot it to file only if region takes more than snapshotThreshold
-func NewTraceRecorder(period, snapshotThreshold time.Duration, bufferSizeBytes int) (TraceFlightRecorder, error) {
+func NewTraceRecorder(period, snapshotThreshold time.Duration, bufferSizeBytes int) TraceFlightRecorder {
 	tr := &traceRecorderLegacy{
 		FlightRecorder:    trace.NewFlightRecorder(),
 		snapshotThreshold: snapshotThreshold,
@@ -28,7 +28,7 @@ func NewTraceRecorder(period, snapshotThreshold time.Duration, bufferSizeBytes i
 	tr.SetPeriod(period)
 	tr.SetSize(bufferSizeBytes)
 
-	return tr, nil
+	return tr
 }
 
 // Stop re-implements TraceFlightRecorder, since legacy FlightRecorder returns error
