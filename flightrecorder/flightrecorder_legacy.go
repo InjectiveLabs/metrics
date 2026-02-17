@@ -31,6 +31,11 @@ func NewTraceRecorder(period, snapshotThreshold time.Duration, bufferSizeBytes i
 	return tr, nil
 }
 
+// Stop re-implements TraceFlightRecorder, since legacy FlightRecorder returns error
+func (tr *traceRecorderLegacy) Stop() {
+	_ = tr.Stop()
+}
+
 // StartRegion starts measuring execution time of a region and if it passes the snapshotThreshold
 // then it flushes recorder trace buffer to file
 func (tr traceRecorderLegacy) StartRegion(tagName, tagValue string) (stopRegion func() error) {
