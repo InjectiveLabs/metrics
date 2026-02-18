@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -83,22 +84,51 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (
 	}
 
 	m.Func(fn, tags...)
-	t := time.Now()
+	start := time.Now()
 
 	var (
-		traceSpan trace.Span
-		spanCtx   context.Context
+		span    trace.Span
+		spanCtx context.Context
 	)
 
 	if m.tracer != nil {
-		spanCtx, traceSpan = m.tracer.Start(ctx, fn, trace.WithAttributes(m.getMergedTags(tags...)...))
+		spanCtx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(m.getMergedTags(tags...)...))
+	}
+
+	// func timeout watchdog
+	doneC := make(chan struct{})
+
+	if timeout := m.metrics.cfg.StuckFuncTimeout; timeout > 0 {
+		go func() {
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+
+			select {
+			case <-doneC:
+				return
+			case <-timer.C:
+				d := time.Since(start)
+
+				if span != nil {
+					err := fmt.Errorf("detected stuck function: %s stuck for %v", fn, d)
+					span.RecordError(err, trace.WithStackTrace(true))
+					span.SetAttributes(Tag("exception.type", "stuck"))
+					span.SetStatus(codes.Error, "stuck")
+					span.End()
+				}
+
+				m.Histogram("func.timing.timeout", d.Milliseconds(), append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
+			}
+		}()
 	}
 
 	return spanCtx, func() {
-		d := time.Since(t)
+		close(doneC)
 
-		if traceSpan != nil {
-			traceSpan.End()
+		d := time.Since(start)
+
+		if span != nil {
+			span.End()
 		}
 
 		m.Histogram("func.timing", d.Milliseconds(), append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck

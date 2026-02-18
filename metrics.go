@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
@@ -13,15 +12,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
-
-type Config struct {
-	Endpoint         string        // gRPC OTEL receiver endpoint, e.g. localhost:4317 or set to empty to disable metrics completely
-	InsecureEndpoint bool          // whether to use TLS during Endpoint connection
-	ExportInterval   time.Duration // time interval between metric exports, default: 10s
-
-	MetricsEnabled bool // whether metrics collections should be enabled
-	TracingEnabled bool // whether tracing should be enabled
-}
 
 // Metrics is a prodiver for telemetry meters.
 // Call Meter() to acquire a scoped meter for your instrumented piece of code.
@@ -103,6 +93,8 @@ type StopFn func()
 // NewMetrics creates a metrics provider that can be used to spawn Meters from.
 // Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
 func NewMetrics(cfg Config, resourceAttributes ...TagAttr) (*Metrics, error) {
+	cfg.setDefaults()
+
 	ms := &Metrics{
 		cfg: cfg,
 	}
@@ -157,10 +149,6 @@ func newMeterProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdkmetric.Me
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new resource failed: %w", err)
-	}
-
-	if cfg.ExportInterval == 0 {
-		cfg.ExportInterval = 10 * time.Second
 	}
 
 	// Create the MeterProvider with the exporter and resource
