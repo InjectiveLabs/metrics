@@ -61,7 +61,7 @@ func newTracerProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdktrace.Tr
 // This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 // using ContextPtr() method
 func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopFn {
-	if m == nil || m.Meter == nil {
+	if m == nil {
 		return func() {}
 	}
 
@@ -79,7 +79,7 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopF
 // spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")()
 // defer stop()
 func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn) {
-	if m == nil || m.Meter == nil {
+	if m == nil {
 		return ctx, func() {}
 	}
 
