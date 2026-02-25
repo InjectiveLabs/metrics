@@ -56,13 +56,15 @@ func newTracerProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdktrace.Tr
 // FuncTiming reports function call and execution time in ms.
 // Fucntion name is stored as "func_name" tag.
 // Uses "func.timing" histogram instrument.
+//
 // Usage: defer metrics.FuncTiming(&sdkCtx, "EndBlocker")()
+// Usage to auto-handle error: defer metrics.FuncTiming(&sdkCtx, "EndBlocker")(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 //
 // This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 // using ContextPtr() method
 func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopFn {
 	if m == nil {
-		return func() {}
+		return noopStopFn
 	}
 
 	ctxPtr := ctx.ContextPtr()
@@ -75,12 +77,17 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopF
 // FuncTimingCtx reports function call and execution time in ms.
 // Fucntion name is stored as "func_name" tag.
 // Uses "func.timing" histogram instrument.
+//
 // Usage:
-// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")()
-// defer stop()
+// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")
+// defer stop(err)
+//
+// Usage to auto-handle error:
+// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")
+// defer stop(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn) {
 	if m == nil {
-		return ctx, func() {}
+		return ctx, noopStopFn
 	}
 
 	m.Func(fn, tags...)
@@ -109,7 +116,7 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (
 			case <-timer.C:
 				d := time.Since(start)
 
-				if span != nil {
+				if span != nil && span.IsRecording() {
 					err := fmt.Errorf("detected stuck function: %s stuck for %v", fn, d)
 					span.RecordError(err, trace.WithStackTrace(true))
 					span.SetAttributes(Tag("exception.type", "stuck"))
@@ -122,15 +129,47 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (
 		}()
 	}
 
-	return spanCtx, func() {
+	return spanCtx, func(errors ...*error) {
 		close(doneC)
 
 		d := time.Since(start)
 
-		if span != nil {
+		var err error
+
+		if len(errors) > 0 {
+			err = *errors[0]
+		}
+
+		if err != nil {
+			m.FuncError(spanCtx, fn, err, tags...)
+		} else if span != nil && span.IsRecording() {
+			span.SetStatus(codes.Ok, "")
 			span.End()
 		}
 
 		m.Histogram("func.timing", d.Milliseconds(), append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
 	}
+}
+
+// FuncError reports fn error metric and also sets current span in context (if present) to Error status with description err.Error()
+func (m *meter) FuncError(ctx context.Context, fn string, err error, tags ...TagAttr) {
+	if m == nil {
+		return
+	}
+
+	m.Error(fn, err, tags...)
+
+	if m.tracer == nil {
+		return
+	}
+
+	span := trace.SpanFromContext(ctx)
+
+	if !span.IsRecording() {
+		return
+	}
+
+	span.SetStatus(codes.Error, err.Error())
+	// span.RecordError(err, errorOpts...) // we will not append exception event with stacktrace to the span for performance reasons, status is enough
+	span.End()
 }

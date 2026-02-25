@@ -88,7 +88,11 @@ type meter struct {
 	tracer trace.Tracer
 }
 
-type StopFn func()
+// StopFn is a callback meant to be called via defer and is used to record function end times.
+// Optional error argument is for convinience to handle error returned from a function and mark it as failed
+type StopFn func(...*error)
+
+var noopStopFn StopFn = func(...*error) {}
 
 // NewMetrics creates a metrics provider that can be used to spawn Meters from.
 // Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
@@ -299,7 +303,7 @@ func (m *meter) Gauge(name string, value int64, tags ...TagAttr) error {
 }
 
 // Histogram records new value into set of values distributed over time, e.g. timer value in ms.
-// Appends tags to Meter baseTags to submit them with the gauge new value.
+// Appends tags to Meter baseTags to submit them with the histogram new value.
 func (m *meter) Histogram(name string, value int64, tags ...TagAttr) error {
 	if m == nil || m.Meter == nil {
 		return nil
@@ -323,4 +327,14 @@ func (m *meter) Func(fn string, tags ...TagAttr) {
 	}
 
 	m.Count("func.called", 1, append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
+}
+
+// Error inrements number of times function errored out as "func.error" counter.
+// Function name is stored in "func_name" tag, and error text in "error" attribute
+func (m *meter) Error(fn string, err error, tags ...TagAttr) {
+	if m == nil || m.Meter == nil {
+		return
+	}
+
+	m.Count("func.error", 1, append([]TagAttr{Tag("func_name", fn), Tag("error", err.Error())}, tags...)...) //nolint:errcheck
 }
