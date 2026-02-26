@@ -85,6 +85,8 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopF
 // Usage to auto-handle error:
 // spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")
 // defer stop(&err) // err <- here is a named ("err") returned error value of an enclosing fn
+//
+// WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
 func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn) {
 	if m == nil {
 		return ctx, noopStopFn

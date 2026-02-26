@@ -57,7 +57,9 @@ type Meter interface {
 	// FuncTiming reports function call and execution time in ms.
 	// Fucntion name is stored as "func_name" tag.
 	// Uses "func.timing" histogram instrument.
+	//
 	// Usage: defer metrics.FuncTiming(&sdkCtx, "EndBlocker")()
+	// Usage to auto-handle error: defer metrics.FuncTiming(&sdkCtx, "EndBlocker")(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 	//
 	// This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 	// using ContextPtr() method
@@ -66,12 +68,20 @@ type Meter interface {
 	// FuncTimingCtx reports function call and execution time in ms.
 	// Fucntion name is stored as "func_name" tag.
 	// Uses "func.timing" histogram instrument.
+	//
 	// Usage:
-	// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")()
-	// defer stop()
+	// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")
+	// defer stop(err)
+	//
+	// Usage to auto-handle error:
+	// spanCtx, stop := metrics.FuncTimingCtx(ctx, "EndBlocker")
+	// defer stop(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 	//
 	// WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
 	FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn)
+
+	// FuncError reports fn error metric and also sets current span in context (if present) to Error status with description err.Error()
+	FuncError(ctx context.Context, fn string, err error, tags ...TagAttr)
 }
 
 type meter struct {
