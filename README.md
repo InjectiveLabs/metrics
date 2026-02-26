@@ -93,3 +93,10 @@ defer appMeter.FuncTiming(&sdkCtx, "EndBlocker", metrics.Tag("block_height", blo
 ```go
 exchangeMeter := appMeter.SubMeter("exchange")
 ```
+
+## Trace Flight Recorder package
+
+It is implemented via new FlightRecorder in go (code). Can be enabled via `--trace-recorder-threshold N` flag, where N is a number of seconds after which block execution time is considered slow and trace will be saved to disk. It works by continuously recording the trace for the last N seconds, and after we detect slow block, we flush the whole trace to disk (to cwd folder). Each block execution time is also marked by the Task with block height in it’s name, so you can focus on specific blocks. To view the trace, find the interesting trace-XXXXXX.out file in root folder ("trace-%s-%s-%d.out", tagName, tagValue, start.Unix()) and from you local machine run:
+```
+go tool trace trace-64240020.out
+```
