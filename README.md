@@ -13,8 +13,13 @@ each keepers. SubMeter() is used to narrow the scope by appending additional roo
 That's why inside modules we must use specialized `keeper.Meter(ctx)`, instead of global `ctx.Meter()`.
 
 Each method has last catch-all argument to provide tags to mark the metric, these tags will be appended to SubMeter and Meter root tags:
-```defer ctx.Meter().FuncTiming(&ctx, "runTx", metrics.Tag("mode", int64(mode)), metrics.Tag("tx_hash", txHash))(&err)```
+```defer ctx.Meter().FuncTiming(&ctx, "runTx", metrics.Tag("mode", int64(mode)), metrics.TraceTag("tx_hash", txHash))(&err)```
 
+To add tags as attributes, the rule of thumb is:
+1) use `metrics.Tag()` to add the tag to both metric and trace
+2) for high-cardinality tags (like *"tx_hash"* or *"block_height"*), only use `metrics.TraceTag()`, since traces are meant to have any combination of attributes
+3) never use high-cardinality tags for metrics, since every combination of attribute set provides a new data series for a single metric. Metrics attribute value set must not be unbounded.
+4) if you want to only add tag into metric but not into trace span, use `metric.MetricTag()`
 
 ## Examples:
 
@@ -47,7 +52,7 @@ k.Meter(ctx).FuncError(ctx, "createTokenPair", err)
 
 4. Just increment some counter
 ```
-k.Meter(ctx).Count("gas_used", tx.GasUsed(), metrics.Tag("tx_hash", tx.Hash())))
+k.Meter(ctx).Count("gas_used", tx.GasUsed(), metrics.TraceTag("tx_hash", tx.Hash())))
 ```
 
 ## How to view metrics
@@ -81,13 +86,13 @@ appMeter, err := appMetrics.NewMeter("injectived", metrics.Tag("env", "mainnet")
 3. Use Meter to send metrics & traces
 ```go
 // increment any counter
-appMeter.Count("blacklisted", 1, metrics.Tag("address", user.Address))
+appMeter.Count("blacklisted", 1, metrics.TraceTag("address", user.Address))
 
 // record func call
 appMeter.Func("GetParams")
 
 // record func call and execution time
-defer appMeter.FuncTiming(&sdkCtx, "EndBlocker", metrics.Tag("block_height", block.height))()
+defer appMeter.FuncTiming(&sdkCtx, "EndBlocker", metrics.TraceTag("block_height", block.height))()
 ```
 4. Optionally, you can split metrics by application modules by using SubMeters derived from root Meter:
 ```go

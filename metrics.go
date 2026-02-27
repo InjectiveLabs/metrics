@@ -36,23 +36,23 @@ type Meter interface {
 
 	// SubMeter creates a new Meter derived from current MEter instance.
 	// Scope name and base tags of sub-meter are then concatenated with parent's ones.
-	SubMeter(subScopeName string, subBaseTags ...TagAttr) Meter
+	SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
 
 	// Count adds an int64 to existing (or new) counter with the name.
 	// Appends tags to Meter baseTags to submit them with the counter new value.
-	Count(name string, numToAdd int64, tags ...TagAttr) error
+	Count(name string, numToAdd int64, tags ...TagAttribute) error
 
 	// Gauge records new gauge int64 reading.
 	// Appends tags to Meter baseTags to submit them with the gauge new value.
-	Gauge(name string, value int64, tags ...TagAttr) error
+	Gauge(name string, value int64, tags ...TagAttribute) error
 
 	// Histogram records new value into set of values distributed over time, e.g. timer value in ms.
 	// Appends tags to Meter baseTags to submit them with the gauge new value.
-	Histogram(name string, value int64, tags ...TagAttr) error
+	Histogram(name string, value int64, tags ...TagAttribute) error
 
 	// Func inrements number of times function was called as "func.called" counter.
 	// Function name is stored in "func_name" tag.
-	Func(fn string, tags ...TagAttr)
+	Func(fn string, tags ...TagAttribute)
 
 	// FuncTiming reports function call and execution time in ms.
 	// Fucntion name is stored as "func_name" tag.
@@ -63,7 +63,7 @@ type Meter interface {
 	//
 	// This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 	// using ContextPtr() method
-	FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopFn
+	FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) StopFn
 
 	// FuncTimingCtx reports function call and execution time in ms.
 	// Fucntion name is stored as "func_name" tag.
@@ -78,18 +78,20 @@ type Meter interface {
 	// defer stop(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 	//
 	// WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
-	FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn)
+	FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribute) (context.Context, StopFn)
 
 	// FuncError reports fn error metric and also sets current span in context (if present) to Error status with description err.Error()
-	FuncError(ctx context.Context, fn string, err error, tags ...TagAttr)
+	FuncError(ctx context.Context, fn string, err error, tags ...TagAttribute)
 }
+
+var _ Meter = (*meter)(nil)
 
 type meter struct {
 	metric.Meter
 
 	name     string
 	metrics  *Metrics
-	baseTags []TagAttr
+	baseTags []TagAttribute
 
 	counters   sync.Map // string => metric.Int64Counter
 	gauges     sync.Map // string => metric.Int64Gauge
@@ -106,7 +108,7 @@ var noopStopFn StopFn = func(...*error) {}
 
 // NewMetrics creates a metrics provider that can be used to spawn Meters from.
 // Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
-func NewMetrics(cfg Config, resourceAttributes ...TagAttr) (*Metrics, error) {
+func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error) {
 	cfg.setDefaults()
 
 	ms := &Metrics{
@@ -137,7 +139,7 @@ func NewMetrics(cfg Config, resourceAttributes ...TagAttr) (*Metrics, error) {
 	return ms, nil
 }
 
-func newMeterProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdkmetric.MeterProvider, error) {
+func newMeterProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdkmetric.MeterProvider, error) {
 	ctx := context.Background()
 
 	// Create the OTLP exporter
@@ -159,7 +161,7 @@ func newMeterProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdkmetric.Me
 		resource.WithProcess(),
 		resource.WithOS(),
 		resource.WithContainer(),
-		resource.WithAttributes(resourceAttributes...),
+		resource.WithAttributes(toAttrs(resourceAttributes)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new resource failed: %w", err)
@@ -176,7 +178,7 @@ func newMeterProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdkmetric.Me
 }
 
 // NewMeter return a new meter instance, that has a defined unique scope and is used to provide metrics
-func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttr) (Meter, error) {
+func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttribute) (Meter, error) {
 	var m *meter
 
 	if ms.disabled {
@@ -221,12 +223,12 @@ func (ms *Metrics) Shutdown() error {
 
 // SubMeter creates a new Meter derived from current MEter instance.
 // Scope name and base tags of sub-meter are then concatenated with parent's ones.
-func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttr) Meter {
+func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter {
 	if m == nil {
 		return NewNilMeter()
 	}
 
-	mergedBaseTags := append(append([]TagAttr{}, m.baseTags...), subBaseTags...)
+	mergedBaseTags := append(append([]TagAttribute{}, m.baseTags...), subBaseTags...)
 
 	subMeter := &meter{
 		name:     subScopeName,
@@ -280,7 +282,7 @@ func (m *meter) getHistogram(name string) (metric.Int64Histogram, error) {
 
 // Count adds an int64 to existing (or new) counter with the name.
 // Appends tags to Meter baseTags to submit them with the counter new value.
-func (m *meter) Count(name string, numToAdd int64, tags ...TagAttr) error {
+func (m *meter) Count(name string, numToAdd int64, tags ...TagAttribute) error {
 	if m == nil || m.Meter == nil {
 		return nil
 	}
@@ -290,14 +292,14 @@ func (m *meter) Count(name string, numToAdd int64, tags ...TagAttr) error {
 		return fmt.Errorf("can't get %s counter: %w", name, err)
 	}
 
-	c.Add(context.Background(), numToAdd, metric.WithAttributes(m.getMergedTags(tags...)...))
+	c.Add(context.Background(), numToAdd, metric.WithAttributes(toAttrs(m.getMergedMetricTags(tags...))...))
 
 	return nil
 }
 
 // Gauge records new gauge int64 reading.
 // Appends tags to Meter baseTags to submit them with the gauge new value.
-func (m *meter) Gauge(name string, value int64, tags ...TagAttr) error {
+func (m *meter) Gauge(name string, value int64, tags ...TagAttribute) error {
 	if m == nil || m.Meter == nil {
 		return nil
 	}
@@ -307,14 +309,14 @@ func (m *meter) Gauge(name string, value int64, tags ...TagAttr) error {
 		return fmt.Errorf("can't get %s gauge: %w", name, err)
 	}
 
-	g.Record(context.Background(), value, metric.WithAttributes(m.getMergedTags(tags...)...))
+	g.Record(context.Background(), value, metric.WithAttributes(toAttrs(m.getMergedMetricTags(tags...))...))
 
 	return nil
 }
 
 // Histogram records new value into set of values distributed over time, e.g. timer value in ms.
 // Appends tags to Meter baseTags to submit them with the histogram new value.
-func (m *meter) Histogram(name string, value int64, tags ...TagAttr) error {
+func (m *meter) Histogram(name string, value int64, tags ...TagAttribute) error {
 	if m == nil || m.Meter == nil {
 		return nil
 	}
@@ -324,27 +326,27 @@ func (m *meter) Histogram(name string, value int64, tags ...TagAttr) error {
 		return fmt.Errorf("can't get %s histogram: %w", name, err)
 	}
 
-	h.Record(context.Background(), value, metric.WithAttributes(m.getMergedTags(tags...)...))
+	h.Record(context.Background(), value, metric.WithAttributes(toAttrs(m.getMergedMetricTags(tags...))...))
 
 	return nil
 }
 
 // Func inrements number of times function was called as "func.called" counter.
 // Function name is stored in "func_name" tag.
-func (m *meter) Func(fn string, tags ...TagAttr) {
+func (m *meter) Func(fn string, tags ...TagAttribute) {
 	if m == nil || m.Meter == nil {
 		return
 	}
 
-	m.Count("func.called", 1, append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
+	m.Count("func.called", 1, append([]TagAttribute{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
 }
 
 // Error inrements number of times function errored out as "func.error" counter.
-// Function name is stored in "func_name" tag, and error text in "error" attribute
-func (m *meter) Error(fn string, err error, tags ...TagAttr) {
+// Function name is stored in "func_name" tag, error is not used
+func (m *meter) Error(fn string, _ error, tags ...TagAttribute) {
 	if m == nil || m.Meter == nil {
 		return
 	}
 
-	m.Count("func.error", 1, append([]TagAttr{Tag("func_name", fn), Tag("error", err.Error())}, tags...)...) //nolint:errcheck
+	m.Count("func.error", 1, append([]TagAttribute{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
 }

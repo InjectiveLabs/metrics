@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -19,7 +20,7 @@ type ContextPointer interface {
 	ContextPtr() *context.Context
 }
 
-func newTracerProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdktrace.TracerProvider, error) {
+func newTracerProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdktrace.TracerProvider, error) {
 	ctx := context.Background()
 
 	// Reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS from environment
@@ -39,7 +40,7 @@ func newTracerProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdktrace.Tr
 		resource.WithOS(),
 		resource.WithProcess(),
 		resource.WithContainer(),
-		resource.WithAttributes(resourceAttributes...),
+		resource.WithAttributes(toAttrs(resourceAttributes)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new resource failed: %w", err)
@@ -62,7 +63,7 @@ func newTracerProvider(cfg *Config, resourceAttributes ...TagAttr) (*sdktrace.Tr
 //
 // This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 // using ContextPtr() method
-func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopFn {
+func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) StopFn {
 	if m == nil {
 		return noopStopFn
 	}
@@ -87,7 +88,7 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttr) StopF
 // defer stop(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 //
 // WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
-func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (context.Context, StopFn) {
+func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribute) (context.Context, StopFn) {
 	if m == nil {
 		return ctx, noopStopFn
 	}
@@ -101,7 +102,7 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (
 	)
 
 	if m.tracer != nil {
-		spanCtx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(m.getMergedTags(tags...)...))
+		spanCtx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(toAttrs(m.getMergedTraceTags(tags...))...))
 	}
 
 	// func timeout watchdog
@@ -121,12 +122,12 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (
 				if span != nil && span.IsRecording() {
 					err := fmt.Errorf("detected stuck function: %s stuck for %v", fn, d)
 					span.RecordError(err, trace.WithStackTrace(true))
-					span.SetAttributes(Tag("exception.type", "stuck"))
+					span.SetAttributes(attribute.String("exception.type", "stuck"))
 					span.SetStatus(codes.Error, "stuck")
 					span.End()
 				}
 
-				m.Histogram("func.timing.timeout", d.Milliseconds(), append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
+				m.Histogram("func.timing.timeout", d.Milliseconds(), append([]TagAttribute{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
 			}
 		}()
 	}
@@ -149,12 +150,12 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttr) (
 			span.End()
 		}
 
-		m.Histogram("func.timing", d.Milliseconds(), append([]TagAttr{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
+		m.Histogram("func.timing", d.Milliseconds(), append([]TagAttribute{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
 	}
 }
 
 // FuncError reports fn error metric and also sets current span in context (if present) to Error status with description err.Error()
-func (m *meter) FuncError(ctx context.Context, fn string, err error, tags ...TagAttr) {
+func (m *meter) FuncError(ctx context.Context, fn string, err error, tags ...TagAttribute) {
 	if m == nil {
 		return
 	}
