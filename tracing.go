@@ -98,11 +98,10 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribu
 
 	var (
 		span    trace.Span
-		spanCtx context.Context
 	)
 
 	if m.tracer != nil {
-		spanCtx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(toAttrs(m.getMergedTraceTags(tags...))...))
+		ctx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(toAttrs(m.getMergedTraceTags(tags...))...))
 	}
 
 	// func timeout watchdog
@@ -132,7 +131,7 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribu
 		}()
 	}
 
-	return spanCtx, func(errors ...*error) {
+	return ctx, func(errors ...*error) {
 		close(doneC)
 
 		d := time.Since(start)
@@ -144,7 +143,7 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribu
 		}
 
 		if err != nil {
-			m.FuncError(spanCtx, fn, err, tags...)
+			m.FuncError(ctx, fn, err, tags...)
 		} else if span != nil && span.IsRecording() {
 			span.SetStatus(codes.Ok, "")
 			span.End()
