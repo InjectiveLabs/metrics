@@ -106,7 +106,7 @@ type StopFn func(...*error)
 
 var noopStopFn StopFn = func(...*error) {}
 
-// NewMetrics creates a metrics provider that can be used to spawn Meters from.
+// NewMetrics creates a metrics and traces providers that can be used to spawn Meters from.
 // Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
 func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error) {
 	cfg.setDefaults()
