@@ -389,7 +389,7 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		}
 
 		require.Error(t, exec())
-		require.Len(t, rec.calls, 3)
+		require.Len(t, rec.calls, 4)
 
 		expectedTags := []string{"foo=bar", "func_name=1"}
 		assert.Equal(t, "Incr", rec.calls[0][0])
@@ -397,13 +397,17 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		assert.ElementsMatch(t, expectedTags, rec.calls[0][2])
 
 		expectedTags = []string{"foo=bar", "stop=error", "func_name=1"}
-		assert.Equal(t, "Histogram", rec.calls[1][0])
+		assert.Equal(t, "Timing", rec.calls[1][0])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
 		assert.ElementsMatch(t, expectedTags, rec.calls[1][3])
 
-		assert.Equal(t, "Incr", rec.calls[2][0])
-		assert.Equal(t, "func.error", rec.calls[2][1])
-		assert.ElementsMatch(t, expectedTags, rec.calls[2][2])
+		assert.Equal(t, "Histogram", rec.calls[2][0])
+		assert.Equal(t, "func.time", rec.calls[2][1])
+		assert.ElementsMatch(t, expectedTags, rec.calls[2][3])
+
+		assert.Equal(t, "Incr", rec.calls[3][0])
+		assert.Equal(t, "func.error", rec.calls[3][1])
+		assert.ElementsMatch(t, expectedTags, rec.calls[3][2])
 	})
 
 	t.Run("can be deferred and skip error reporting if nil", func(t *testing.T) {
@@ -414,10 +418,11 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		}
 
 		exec()
-		require.Len(t, rec.calls, 2)
+		require.Len(t, rec.calls, 3)
 
 		assert.Equal(t, "func.called", rec.calls[0][1])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
+		assert.Equal(t, "func.time", rec.calls[2][1])
 	})
 
 	t.Run("can use a specific name", func(t *testing.T) {
@@ -430,7 +435,7 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		}
 
 		require.Error(t, exec())
-		require.Len(t, rec.calls, 3)
+		require.Len(t, rec.calls, 4)
 
 		expectedTags := []string{"foo=bar", "func_name=customFunc"}
 		assert.Equal(t, "Incr", rec.calls[0][0])
@@ -438,13 +443,17 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		assert.ElementsMatch(t, expectedTags, rec.calls[0][2])
 
 		expectedTags = []string{"foo=bar", "stop=error", "func_name=customFunc"}
-		assert.Equal(t, "Histogram", rec.calls[1][0])
+		assert.Equal(t, "Timing", rec.calls[1][0])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
 		assert.ElementsMatch(t, expectedTags, rec.calls[1][3])
 
-		assert.Equal(t, "Incr", rec.calls[2][0])
-		assert.Equal(t, "func.error", rec.calls[2][1])
-		assert.ElementsMatch(t, expectedTags, rec.calls[2][2])
+		assert.Equal(t, "Histogram", rec.calls[2][0])
+		assert.Equal(t, "func.time", rec.calls[2][1])
+		assert.ElementsMatch(t, expectedTags, rec.calls[2][3])
+
+		assert.Equal(t, "Incr", rec.calls[3][0])
+		assert.Equal(t, "func.error", rec.calls[3][1])
+		assert.ElementsMatch(t, expectedTags, rec.calls[3][2])
 	})
 
 	t.Run("can be deferred with new tags and skip error reporting", func(t *testing.T) {
@@ -455,12 +464,14 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		}
 
 		exec()
-		require.Len(t, rec.calls, 2)
+		require.Len(t, rec.calls, 3)
 
 		expectedTags := []string{"foo=bar", "something=new", "func_name=1"}
 		assert.Equal(t, "func.called", rec.calls[0][1])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
 		assert.ElementsMatch(t, expectedTags, rec.calls[1][3])
+		assert.Equal(t, "func.time", rec.calls[2][1])
+		assert.ElementsMatch(t, expectedTags, rec.calls[2][3])
 	})
 }
 
