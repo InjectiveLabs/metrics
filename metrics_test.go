@@ -397,7 +397,7 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		assert.ElementsMatch(t, expectedTags, rec.calls[0][2])
 
 		expectedTags = []string{"foo=bar", "stop=error", "func_name=1"}
-		assert.Equal(t, "Timing", rec.calls[1][0])
+		assert.Equal(t, "Histogram", rec.calls[1][0])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
 		assert.ElementsMatch(t, expectedTags, rec.calls[1][3])
 
@@ -438,7 +438,7 @@ func Test_ReportTimedFuncWithError(t *testing.T) {
 		assert.ElementsMatch(t, expectedTags, rec.calls[0][2])
 
 		expectedTags = []string{"foo=bar", "stop=error", "func_name=customFunc"}
-		assert.Equal(t, "Timing", rec.calls[1][0])
+		assert.Equal(t, "Histogram", rec.calls[1][0])
 		assert.Equal(t, "func.timing", rec.calls[1][1])
 		assert.ElementsMatch(t, expectedTags, rec.calls[1][3])
 
