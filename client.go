@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 const (
 	DatadogAgent  = "datadog"
 	TelegrafAgent = "telegraf"
+	OTELAgent     = "otel"
 )
 
 var (
@@ -29,27 +31,29 @@ var (
 	clientMux = new(sync.RWMutex)
 	config    *StatterConfig
 
-	traceProvider  *ddotel.TracerProvider
-	tracer         trace.Tracer
-	mixPanelClient *mixpanel.ApiClient
+	traceProviderShutdownFn func() error
+	tracer                  trace.Tracer
+	mixPanelClient          *mixpanel.ApiClient
 )
 
 type StatterConfig struct {
-	Addr                 string        // localhost:8125
-	Prefix               string        // metrics prefix
-	Agent                string        // telegraf/datadog
-	EnvName              string        // dev/test/staging/prod
-	HostName             string        // hostname
-	Version              string        // version
-	DefaultTags          []interface{} // default tags for all metrics
-	StuckFunctionTimeout time.Duration // stuck time
-	MockingThreshold     time.Duration // mocking threshold
-	MockingEnabled       bool          // whether to enable mock statter, which only produce logs
-	Disabled             bool          // whether to disable metrics completely
-	TracingEnabled       bool          // whether DataDog tracing should be enabled (via OpenTelemetry)
-	ProfilingEnabled     bool          // whether Datadog profiling should be enabled
-	MixPanelEnabled      bool          // whether MixPanel should be enabled
-	MixPanelProjectToken string        // MixPanel project token
+	Addr                 string            // localhost:8125
+	Prefix               string            // metrics prefix
+	Agent                string            // telegraf/datadog
+	EnvName              string            // dev/test/staging/prod
+	HostName             string            // hostname
+	Version              string            // version
+	DefaultTags          []interface{}     // default tags for all metrics
+	StuckFunctionTimeout time.Duration     // stuck time
+	MockingThreshold     time.Duration     // mocking threshold
+	MockingEnabled       bool              // whether to enable mock statter, which only produce logs
+	Disabled             bool              // whether to disable metrics completely
+	TracingEnabled       bool              // whether tracing should be enabled
+	ProfilingEnabled     bool              // whether Datadog profiling should be enabled
+	MixPanelEnabled      bool              // whether MixPanel should be enabled
+	MixPanelProjectToken string            // MixPanel project token
+	OTELInsecure         bool              // disable TLS (use for self-hosted SigNoz without TLS)
+	OTELHeaders          map[string]string // extra headers, e.g. {"signoz-access-token": "<token>"} for SigNoz Cloud
 }
 
 func (m *StatterConfig) BaseTags() []string {
@@ -67,6 +71,16 @@ func (m *StatterConfig) BaseTags() []string {
 		}
 		for k, v := range defaultTags {
 			baseTags = append(baseTags, k+":"+v)
+		}
+	case OTELAgent:
+		if len(config.EnvName) > 0 {
+			baseTags = append(baseTags, "env="+config.EnvName)
+		}
+		if len(config.HostName) > 0 {
+			baseTags = append(baseTags, "machine="+config.HostName)
+		}
+		for k, v := range defaultTags {
+			baseTags = append(baseTags, k+"="+v)
 		}
 	// telegraf by default
 	default:
@@ -97,10 +111,14 @@ type Statter interface {
 func Close() {
 	clientMux.RLock()
 	defer clientMux.RUnlock()
-	if client == nil {
-		return
+
+	if client != nil {
+		client.Close()
 	}
-	client.Close()
+
+	if traceProviderShutdownFn != nil {
+		traceProviderShutdownFn()
+	}
 }
 
 func Init(addr string, prefix string, cfg *StatterConfig) error {
@@ -135,6 +153,16 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 			statsd.TagsFormat(statsd.InfluxDB),
 			statsd.Tags(config.BaseTags()...),
 		)
+
+	case OTELAgent:
+		statter, err = newOTELStatter(
+			addr,
+			prefix,
+			cfg.OTELInsecure,
+			cfg.OTELHeaders,
+			config.BaseTags(),
+		)
+
 	default:
 		return ErrUnsupportedAgent
 	}
@@ -149,9 +177,20 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 
 	// OpenTelemetry tracing via DataDog provider
 	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
-		traceProvider = ddotel.NewTracerProvider()
+		traceProvider := ddotel.NewTracerProvider()
 		otel.SetTracerProvider(traceProvider)
 		tracer = otel.Tracer("")
+		traceProviderShutdownFn = traceProvider.Shutdown
+	} else if cfg.Agent == OTELAgent && cfg.TracingEnabled {
+		traceProvider, err := newOTELTracerProvider(addr, cfg.OTELInsecure, cfg.OTELHeaders, config.BaseTags())
+		if err != nil {
+			return errors.Wrap(err, "otel tracer provider init failed")
+		}
+		otel.SetTracerProvider(traceProvider)
+		tracer = otel.Tracer(prefix)
+		traceProviderShutdownFn = func() error {
+			return traceProvider.Shutdown(context.Background())
+		}
 	}
 
 	if cfg.Agent == DatadogAgent && cfg.ProfilingEnabled {
