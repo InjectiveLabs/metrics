@@ -69,7 +69,7 @@ func newOTELStatter(endpoint, prefix string, insecure bool, headers map[string]s
 	return &otelStatter{
 		meter:          mp.Meter(prefix),
 		meterProvider:  mp,
-		prefix:         prefix + ".",
+		prefix:         prefix,
 		updownCounters: make(map[string]otelmetric.Int64UpDownCounter),
 		gauges:         make(map[string]otelmetric.Float64Gauge),
 		histograms:     make(map[string]otelmetric.Float64Histogram),
