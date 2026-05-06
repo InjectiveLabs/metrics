@@ -193,7 +193,6 @@ func reportTiming(ctx context.Context, fn string, tags ...Tags) (context.Context
 		clientMux.RLock()
 		defer clientMux.RUnlock()
 		client.Timing("func.timing", d, stopTagArray, 1)
-		client.Histogram("func.time", d.Seconds()*1000, stopTagArray, 1)
 		if span != nil {
 			span.End()
 		}
@@ -235,7 +234,6 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 		clientMux.RLock()
 		defer clientMux.RUnlock()
 		client.Timing("func.timing", d, stopTagArray, 1)
-		client.Histogram("func.time", d.Seconds()*1000, stopTagArray, 1)
 	}
 }
 
