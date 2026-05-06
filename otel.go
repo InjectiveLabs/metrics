@@ -19,6 +19,7 @@ import (
 type otelStatter struct {
 	meter         otelmetric.Meter
 	meterProvider *sdkmetric.MeterProvider
+	prefix        string
 
 	mu             sync.RWMutex
 	updownCounters map[string]otelmetric.Int64UpDownCounter
@@ -68,6 +69,7 @@ func newOTELStatter(endpoint, prefix string, insecure bool, headers map[string]s
 	return &otelStatter{
 		meter:          mp.Meter(prefix),
 		meterProvider:  mp,
+		prefix:         prefix + ".",
 		updownCounters: make(map[string]otelmetric.Int64UpDownCounter),
 		gauges:         make(map[string]otelmetric.Float64Gauge),
 		histograms:     make(map[string]otelmetric.Float64Histogram),
@@ -113,62 +115,65 @@ func (s *otelStatter) tagsToAttrs(tags []string) []attribute.KeyValue {
 }
 
 func (s *otelStatter) getUpDownCounter(name string) (otelmetric.Int64UpDownCounter, error) {
+	fullName := s.prefix + name
 	s.mu.RLock()
-	c, ok := s.updownCounters[name]
+	c, ok := s.updownCounters[fullName]
 	s.mu.RUnlock()
 	if ok {
 		return c, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if c, ok = s.updownCounters[name]; ok {
+	if c, ok = s.updownCounters[fullName]; ok {
 		return c, nil
 	}
-	c, err := s.meter.Int64UpDownCounter(name)
+	c, err := s.meter.Int64UpDownCounter(fullName)
 	if err != nil {
 		return nil, err
 	}
-	s.updownCounters[name] = c
+	s.updownCounters[fullName] = c
 	return c, nil
 }
 
 func (s *otelStatter) getGauge(name string) (otelmetric.Float64Gauge, error) {
+	fullName := s.prefix + name
 	s.mu.RLock()
-	g, ok := s.gauges[name]
+	g, ok := s.gauges[fullName]
 	s.mu.RUnlock()
 	if ok {
 		return g, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if g, ok = s.gauges[name]; ok {
+	if g, ok = s.gauges[fullName]; ok {
 		return g, nil
 	}
-	g, err := s.meter.Float64Gauge(name)
+	g, err := s.meter.Float64Gauge(fullName)
 	if err != nil {
 		return nil, err
 	}
-	s.gauges[name] = g
+	s.gauges[fullName] = g
 	return g, nil
 }
 
 func (s *otelStatter) getHistogram(name string) (otelmetric.Float64Histogram, error) {
+	fullName := s.prefix + name
 	s.mu.RLock()
-	h, ok := s.histograms[name]
+	h, ok := s.histograms[fullName]
 	s.mu.RUnlock()
 	if ok {
 		return h, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if h, ok = s.histograms[name]; ok {
+	if h, ok = s.histograms[fullName]; ok {
 		return h, nil
 	}
-	h, err := s.meter.Float64Histogram(name)
+	h, err := s.meter.Float64Histogram(fullName)
 	if err != nil {
 		return nil, err
 	}
-	s.histograms[name] = h
+	s.histograms[fullName] = h
 	return h, nil
 }
 
