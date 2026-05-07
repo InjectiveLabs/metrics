@@ -169,7 +169,7 @@ func (s *otelStatter) getHistogram(name string) (otelmetric.Float64Histogram, er
 	if h, ok = s.histograms[fullName]; ok {
 		return h, nil
 	}
-	h, err := s.meter.Float64Histogram(fullName)
+	h, err := s.meter.Float64Histogram(fullName, otelmetric.WithUnit("ms"))
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ func (s *otelStatter) Timing(name string, value time.Duration, tags []string, ra
 		return err
 	}
 	// OTel convention: duration histograms use seconds
-	h.Record(context.Background(), value.Seconds(), otelmetric.WithAttributes(s.tagsToAttrs(tags)...))
+	h.Record(context.Background(), value.Seconds()*1000, otelmetric.WithAttributes(s.tagsToAttrs(tags)...))
 	return nil
 }
 
