@@ -218,7 +218,7 @@ func (s *otelStatter) Timing(name string, value time.Duration, tags []string, ra
 	if err != nil {
 		return err
 	}
-	// OTel convention: duration histograms use seconds
+	// OTel convention: duration histograms use milliseconds
 	h.Record(context.Background(), value.Seconds()*1000, otelmetric.WithAttributes(s.tagsToAttrs(tags)...))
 	return nil
 }
