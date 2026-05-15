@@ -98,8 +98,8 @@ func ReportNamedFuncCallAndTimingCtxWithErrAndLog(ctx context.Context, fn string
 	reportFunc(fn, "called", tags...)
 	ctx, stop := reportTiming(ctx, fn, tags...)
 
+	ctx = logctx.WithLogger(ctx, logctx.Logger(ctx))
 	if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
-		ctx = logctx.WithLogger(ctx, logctx.Logger(ctx))
 		logctx.WithField(ctx, "trace_id", sc.TraceID().String())
 		logctx.WithField(ctx, "span_id", sc.SpanID().String())
 	}
