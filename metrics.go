@@ -10,6 +10,7 @@ import (
 	"time"
 
 	log "github.com/InjectiveLabs/suplog"
+	"github.com/InjectiveLabs/suplog/logctx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/mixpanel/mixpanel-go"
 	"go.opentelemetry.io/otel/attribute"
@@ -81,6 +82,29 @@ func ReportNamedFuncCallAndTimingCtxWithErr(ctx context.Context, fn string, tags
 	reportFunc(fn, "called", tags...)
 	_, stop := reportTiming(ctx, fn, tags...)
 	return func(err *error, stopTags ...Tags) {
+		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
+		stop(finalTags)
+		if err != nil && *err != nil {
+			ReportClosureFuncError(fn, finalTags)
+		}
+	}
+}
+
+func ReportFuncCallAndTimingCtxWithErrAndLog(ctx context.Context, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
+	return ReportNamedFuncCallAndTimingCtxWithErrAndLog(ctx, CallerFuncName(1), tags...)
+}
+
+func ReportNamedFuncCallAndTimingCtxWithErrAndLog(ctx context.Context, fn string, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
+	reportFunc(fn, "called", tags...)
+	ctx, stop := reportTiming(ctx, fn, tags...)
+
+	if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
+		ctx = logctx.WithLogger(ctx, logctx.Logger(ctx))
+		logctx.WithField(ctx, "trace_id", sc.TraceID().String())
+		logctx.WithField(ctx, "span_id", sc.SpanID().String())
+	}
+
+	return ctx, func(err *error, stopTags ...Tags) {
 		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
 		stop(finalTags)
 		if err != nil && *err != nil {

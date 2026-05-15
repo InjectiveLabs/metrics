@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/DataDog/datadog-go/v5 v5.3.0
-	github.com/InjectiveLabs/suplog v1.3.3
+	github.com/InjectiveLabs/suplog v1.7.1
 	github.com/alexcesaro/statsd v2.0.0+incompatible
 	github.com/cosmos/cosmos-sdk v0.50.6
 	github.com/mixpanel/mixpanel-go v1.2.1
