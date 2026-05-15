@@ -11,6 +11,7 @@ import (
 	"github.com/mixpanel/mixpanel-go"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	ddotel "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentelemetry"
 	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
@@ -186,6 +187,10 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 		if err != nil {
 			return errors.Wrap(err, "otel tracer provider init failed")
 		}
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		))
 		otel.SetTracerProvider(traceProvider)
 		tracer = otel.Tracer(prefix)
 		traceProviderShutdownFn = func() error {
