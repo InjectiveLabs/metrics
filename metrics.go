@@ -74,36 +74,13 @@ func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Contex
 	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
-func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(err *error, stopTags ...Tags) {
+func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
 	return ReportNamedFuncCallAndTimingCtxWithErr(ctx, CallerFuncName(1), tags...)
 }
 
-func ReportNamedFuncCallAndTimingCtxWithErr(ctx context.Context, fn string, tags ...Tags) func(err *error, stopTags ...Tags) {
-	reportFunc(fn, "called", tags...)
-	_, stop := reportTiming(ctx, fn, tags...)
-	return func(err *error, stopTags ...Tags) {
-		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
-		stop(finalTags)
-		if err != nil && *err != nil {
-			ReportClosureFuncError(fn, finalTags)
-		}
-	}
-}
-
-func ReportFuncCallAndTimingCtxWithErrAndLog(ctx context.Context, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
-	return ReportNamedFuncCallAndTimingCtxWithErrAndLog(ctx, CallerFuncName(1), tags...)
-}
-
-func ReportNamedFuncCallAndTimingCtxWithErrAndLog(ctx context.Context, fn string, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
+func ReportNamedFuncCallAndTimingCtxWithErr(ctx context.Context, fn string, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
 	reportFunc(fn, "called", tags...)
 	ctx, stop := reportTiming(ctx, fn, tags...)
-
-	ctx = logctx.WithLogger(ctx, logctx.Logger(ctx))
-	if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
-		logctx.WithField(ctx, "trace_id", sc.TraceID().String())
-		logctx.WithField(ctx, "span_id", sc.SpanID().String())
-	}
-
 	return ctx, func(err *error, stopTags ...Tags) {
 		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
 		stop(finalTags)
@@ -180,6 +157,12 @@ func reportTiming(ctx context.Context, fn string, tags ...Tags) (context.Context
 			for k, v := range tags {
 				span.SetAttributes(attribute.String(k, v))
 			}
+		}
+
+		spanCtx = logctx.WithLogger(spanCtx, logctx.Logger(spanCtx))
+		if sc := span.SpanContext(); sc.IsValid() {
+			logctx.WithField(spanCtx, "trace_id", sc.TraceID().String())
+			logctx.WithField(spanCtx, "span_id", sc.SpanID().String())
 		}
 	}
 
