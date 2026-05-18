@@ -10,6 +10,7 @@ import (
 	"time"
 
 	log "github.com/InjectiveLabs/suplog"
+	"github.com/InjectiveLabs/suplog/logctx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/mixpanel/mixpanel-go"
 	"go.opentelemetry.io/otel/attribute"
@@ -73,17 +74,17 @@ func ReportFuncCallAndTimingSdkCtx(sdkCtx sdk.Context, tags ...Tags) (sdk.Contex
 	return sdkCtx.WithContext(spanCtx), doneFn
 }
 
-func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) func(err *error, stopTags ...Tags) {
+func ReportFuncCallAndTimingCtxWithErr(ctx context.Context, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
 	return ReportNamedFuncCallAndTimingCtxWithErr(ctx, CallerFuncName(1), tags...)
 }
 
-func ReportNamedFuncCallAndTimingCtxWithErr(ctx context.Context, fn string, tags ...Tags) func(err *error, stopTags ...Tags) {
+func ReportNamedFuncCallAndTimingCtxWithErr(ctx context.Context, fn string, tags ...Tags) (context.Context, func(err *error, stopTags ...Tags)) {
 	reportFunc(fn, "called", tags...)
-	_, stop := reportTiming(ctx, fn, tags...)
-	return func(err *error, stopTags ...Tags) {
-		finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
-		stop(finalTags)
+	ctx, stop := reportTiming(ctx, fn, tags...)
+	return ctx, func(err *error, stopTags ...Tags) {
+		stop(stopTags...)
 		if err != nil && *err != nil {
+			finalTags := MergeTags(MergeTags(nil, tags...), stopTags...)
 			ReportClosureFuncError(fn, finalTags)
 		}
 	}
@@ -156,6 +157,12 @@ func reportTiming(ctx context.Context, fn string, tags ...Tags) (context.Context
 			for k, v := range tags {
 				span.SetAttributes(attribute.String(k, v))
 			}
+		}
+
+		spanCtx = logctx.WithLogger(spanCtx, logctx.Logger(spanCtx))
+		if sc := span.SpanContext(); sc.IsValid() {
+			logctx.WithField(spanCtx, "trace_id", sc.TraceID().String())
+			logctx.WithField(spanCtx, "span_id", sc.SpanID().String())
 		}
 	}
 
