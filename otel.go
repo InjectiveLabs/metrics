@@ -233,5 +233,9 @@ func (s *otelStatter) Histogram(name string, value float64, tags []string, rate 
 }
 
 func (s *otelStatter) Close() error {
-	return s.meterProvider.Shutdown(context.Background())
+	return s.CloseCtx(context.Background())
+}
+
+func (s *otelStatter) CloseCtx(ctx context.Context) error {
+	return s.meterProvider.Shutdown(ctx)
 }

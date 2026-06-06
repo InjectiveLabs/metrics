@@ -18,6 +18,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+var DefaultCloseTimeout = time.Second * 10
+
 func ReportFunc(fn, action string, tags ...Tags) {
 	reportFunc(fn, action, tags...)
 }

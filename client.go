@@ -32,7 +32,7 @@ var (
 	clientMux = new(sync.RWMutex)
 	config    *StatterConfig
 
-	traceProviderShutdownFn func() error
+	traceProviderShutdownFn func(ctx context.Context) error
 	tracer                  trace.Tracer
 	mixPanelClient          *mixpanel.ApiClient
 )
@@ -109,17 +109,32 @@ type Statter interface {
 	Close() error
 }
 
-func Close() {
-	clientMux.RLock()
-	defer clientMux.RUnlock()
+type timedCloser interface {
+	CloseCtx(ctx context.Context) error
+}
+
+func CloseWithTimeout(timeout time.Duration) {
+	clientMux.Lock()
+	defer clientMux.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
 	if client != nil {
-		client.Close()
+		if ct, ok := client.(timedCloser); ok {
+			_ = ct.CloseCtx(ctx)
+		} else {
+			_ = client.Close()
+		}
 	}
 
 	if traceProviderShutdownFn != nil {
-		traceProviderShutdownFn()
+		_ = traceProviderShutdownFn(ctx)
 	}
+}
+
+func Close() {
+	CloseWithTimeout(DefaultCloseTimeout)
 }
 
 func Init(addr string, prefix string, cfg *StatterConfig) error {
@@ -181,7 +196,9 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 		traceProvider := ddotel.NewTracerProvider()
 		otel.SetTracerProvider(traceProvider)
 		tracer = otel.Tracer("")
-		traceProviderShutdownFn = traceProvider.Shutdown
+		traceProviderShutdownFn = func(_ context.Context) error {
+			return traceProvider.Shutdown()
+		}
 	} else if cfg.Agent == OTELAgent && cfg.TracingEnabled {
 		traceProvider, err := newOTELTracerProvider(addr, cfg.OTELInsecure, cfg.OTELHeaders, config.BaseTags())
 		if err != nil {
@@ -193,8 +210,8 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 		))
 		otel.SetTracerProvider(traceProvider)
 		tracer = otel.Tracer(prefix)
-		traceProviderShutdownFn = func() error {
-			return traceProvider.Shutdown(context.Background())
+		traceProviderShutdownFn = func(ctx context.Context) error {
+			return traceProvider.Shutdown(ctx)
 		}
 	}
 
