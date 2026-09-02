@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	dogstatsd "github.com/DataDog/datadog-go/v5/statsd"
@@ -32,12 +33,33 @@ var (
 
 	client    Statter
 	clientMux = new(sync.RWMutex)
-	config    *StatterConfig
+
+	// configPtr holds the active StatterConfig. Init used to assign a package-level
+	// variable with no synchronisation at all, while every reporting call read it -
+	// JoinTags and the stuck-function timers do so on the hot path. Services that
+	// initialise metrics on a goroutine (a retry loop around Init is the common
+	// shape) therefore raced Init against their own first reports; `go test -race`
+	// catches it immediately once a test does the same thing.
+	configPtr atomic.Pointer[StatterConfig]
 
 	traceProviderShutdownFn func(ctx context.Context) error
 	tracer                  trace.Tracer
 	mixPanelClient          *mixpanel.ApiClient
 )
+
+// currentConfig returns the active config, or an empty one when Init has not run.
+// Returning a zero value rather than nil keeps a report that arrives before Init
+// harmless, which is the same thing the nil-client check does one level up.
+func currentConfig() *StatterConfig {
+	if cfg := configPtr.Load(); cfg != nil {
+		return cfg
+	}
+	return &StatterConfig{}
+}
+
+func setCurrentConfig(cfg *StatterConfig) {
+	configPtr.Store(cfg)
+}
 
 type StatterConfig struct {
 	Addr                   string            // localhost:8125
@@ -67,32 +89,32 @@ func (m *StatterConfig) BaseTags() []string {
 	switch m.Agent {
 
 	case DatadogAgent:
-		if len(config.EnvName) > 0 {
-			baseTags = append(baseTags, "env:"+config.EnvName)
+		if len(m.EnvName) > 0 {
+			baseTags = append(baseTags, "env:"+m.EnvName)
 		}
-		if len(config.HostName) > 0 {
-			baseTags = append(baseTags, "machine:"+config.HostName)
+		if len(m.HostName) > 0 {
+			baseTags = append(baseTags, "machine:"+m.HostName)
 		}
 		for k, v := range defaultTags {
 			baseTags = append(baseTags, k+":"+v)
 		}
 	case OTELAgent:
-		if len(config.EnvName) > 0 {
-			baseTags = append(baseTags, "env="+config.EnvName)
+		if len(m.EnvName) > 0 {
+			baseTags = append(baseTags, "env="+m.EnvName)
 		}
-		if len(config.HostName) > 0 {
-			baseTags = append(baseTags, "machine="+config.HostName)
+		if len(m.HostName) > 0 {
+			baseTags = append(baseTags, "machine="+m.HostName)
 		}
 		for k, v := range defaultTags {
 			baseTags = append(baseTags, k+"="+v)
 		}
 	// telegraf by default
 	default:
-		if len(config.EnvName) > 0 {
-			baseTags = append(baseTags, "env", config.EnvName)
+		if len(m.EnvName) > 0 {
+			baseTags = append(baseTags, "env", m.EnvName)
 		}
-		if len(config.HostName) > 0 {
-			baseTags = append(baseTags, "machine", config.HostName)
+		if len(m.HostName) > 0 {
+			baseTags = append(baseTags, "machine", m.HostName)
 		}
 		for k, v := range defaultTags {
 			baseTags = append(baseTags, k, v)
@@ -141,8 +163,9 @@ func Close() {
 }
 
 func Init(addr string, prefix string, cfg *StatterConfig) error {
-	config = checkConfig(cfg)
-	if config.MockingEnabled {
+	cfg = checkConfig(cfg)
+	setCurrentConfig(cfg)
+	if cfg.MockingEnabled {
 		// init a mock statter instead of real statsd client
 		clientMux.Lock()
 		client = newMockStatter(cfg)
@@ -166,7 +189,7 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 			return traceProvider.Shutdown()
 		}
 	} else if cfg.Agent == OTELAgent && cfg.TracingEnabled {
-		traceProvider, err := newOTELTracerProvider(addr, cfg.OTELInsecure, cfg.OTELHeaders, config.BaseTags())
+		traceProvider, err := newOTELTracerProvider(addr, cfg.OTELInsecure, cfg.OTELHeaders, cfg.BaseTags())
 		if err != nil {
 			return errors.Wrap(err, "otel tracer provider init failed")
 		}
@@ -211,7 +234,7 @@ func newStatter(addr, prefix string, cfg *StatterConfig) (Statter, error) {
 			addr,
 			dogstatsd.WithNamespace(prefix),
 			dogstatsd.WithWriteTimeout(time.Duration(10)*time.Second),
-			dogstatsd.WithTags(config.BaseTags()),
+			dogstatsd.WithTags(cfg.BaseTags()),
 		)
 
 	case TelegrafAgent:
@@ -220,7 +243,7 @@ func newStatter(addr, prefix string, cfg *StatterConfig) (Statter, error) {
 			statsd.Prefix(prefix),
 			statsd.ErrorHandler(errHandler),
 			statsd.TagsFormat(statsd.InfluxDB),
-			statsd.Tags(config.BaseTags()...),
+			statsd.Tags(cfg.BaseTags()...),
 		)
 
 	case OTELAgent:
@@ -229,7 +252,7 @@ func newStatter(addr, prefix string, cfg *StatterConfig) (Statter, error) {
 			prefix,
 			cfg.OTELInsecure,
 			cfg.OTELHeaders,
-			config.BaseTags(),
+			cfg.BaseTags(),
 			cfg.OTELUseCounterForCount,
 		)
 
@@ -323,12 +346,9 @@ func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterC
 // It is a no-op when Init has not run, when metrics are mocked, and for agents that
 // manage their own connection - see statterNeedsRefresh.
 func StartRefresh(ctx context.Context, addr, prefix string, interval time.Duration) {
-	// Read straight from the package config, as the rest of the package does. Init
-	// writes it unguarded, so this is only safe in the documented order - after Init
-	// has returned - which is also the only order in which it makes sense to call.
-	cfg := config
+	cfg := currentConfig()
 
-	if cfg == nil || cfg.MockingEnabled || !statterNeedsRefresh(cfg.Agent) {
+	if cfg.Agent == "" || cfg.MockingEnabled || !statterNeedsRefresh(cfg.Agent) {
 		return
 	}
 
@@ -413,7 +433,7 @@ func InitService(ctx context.Context, cfg ServiceConfig) (func(timeout time.Dura
 	}
 
 	if refresh := cfg.refreshInterval(); refresh > 0 && !cfg.MockingEnabled && statterNeedsRefresh(cfg.AgentID) {
-		go startStatterRefresh(ctx, cfg.AgentAddress, cfg.normalizePrefix(), config, refresh)
+		go startStatterRefresh(ctx, cfg.AgentAddress, cfg.normalizePrefix(), currentConfig(), refresh)
 	}
 
 	return CloseWithTimeout, nil

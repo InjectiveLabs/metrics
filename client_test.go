@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func resetClientGlobals(t *testing.T) {
 		clientMux.Lock()
 		client = nil
 		clientMux.Unlock()
-		config = nil
+		setCurrentConfig(nil)
 	})
 }
 
@@ -118,9 +119,9 @@ func TestBaseTags(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Cleanup(func() {
-				config = nil
+				setCurrentConfig(nil)
 			})
-			config = tt.config
+			setCurrentConfig(tt.config)
 			result := tt.config.BaseTags()
 			assert.ElementsMatch(t, tt.expected, result)
 		})
@@ -191,7 +192,7 @@ func TestStartStatterRefreshRebuildsAndClosesTheOldClient(t *testing.T) {
 	resetClientGlobals(t)
 
 	cfg := &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"}
-	config = cfg
+	setCurrentConfig(cfg)
 
 	initial := &countingStatter{}
 	swapStatter(initial)
@@ -215,7 +216,7 @@ func TestStartStatterRefreshStopsOnContextCancel(t *testing.T) {
 	resetClientGlobals(t)
 
 	cfg := &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"}
-	config = cfg
+	setCurrentConfig(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -241,7 +242,7 @@ func TestStartStatterRefreshKeepsClientWhenRebuildFails(t *testing.T) {
 	// has to survive that: a client that might still work beats a nil one, which
 	// drops every metric silently.
 	cfg := &StatterConfig{Agent: "nonexistent-agent"}
-	config = cfg
+	setCurrentConfig(cfg)
 
 	initial := &countingStatter{}
 	swapStatter(initial)
@@ -270,7 +271,7 @@ func TestStartRefreshIsANoOpWhenItCannotHelp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetClientGlobals(t)
-			config = tt.cfg
+			setCurrentConfig(tt.cfg)
 
 			initial := &countingStatter{}
 			swapStatter(initial)
@@ -289,7 +290,7 @@ func TestStartRefreshIsANoOpWhenItCannotHelp(t *testing.T) {
 
 func TestStartRefreshRebuildsForUDPAgents(t *testing.T) {
 	resetClientGlobals(t)
-	config = &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"}
+	setCurrentConfig(&StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"})
 
 	initial := &countingStatter{}
 	swapStatter(initial)
@@ -304,4 +305,60 @@ func TestStartRefreshRebuildsForUDPAgents(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond, "StartRefresh never rebuilt the client")
 
 	assert.Equal(t, 1, initial.closeCount())
+}
+
+// Init used to assign the package-level config with no synchronisation while every
+// reporting call read it - JoinTags and the stuck-function timers do so on the hot
+// path. Any service that initialises metrics on a goroutine, which is the usual shape
+// when Init is wrapped in a retry loop, was racing its own first reports.
+//
+// This reproduces that shape: report continuously while Init runs underneath. It is
+// only meaningful under -race, where it fails outright before the fix.
+func TestInitConcurrentWithReporting_IsRaceFree(t *testing.T) {
+	resetClientGlobals(t)
+
+	// A real socket, so the statter is not logging a write error per report and the
+	// test is measuring the config access rather than the failure path.
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("bind sink: %v", err)
+	}
+	defer sink.Close()
+	addr := sink.LocalAddr().String()
+
+	setCurrentConfig(&StatterConfig{Agent: TelegrafAgent, EnvName: "test", HostName: "host"})
+	swapStatter(&countingStatter{})
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Readers: the reporting path, hammering the config through JoinTags.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				CustomReport(func(s Statter, tagSpec []string) {
+					_ = s.Gauge("probe", 1, tagSpec, 1)
+				}, Tags{"svc": "test"})
+			}
+		}()
+	}
+
+	// Writer: repeated Init, as a retry loop or a re-init would do.
+	for i := 0; i < 50; i++ {
+		if err := Init(addr, "racetest.", &StatterConfig{
+			Agent: TelegrafAgent, EnvName: "test", HostName: "host",
+		}); err != nil {
+			t.Fatalf("init: %v", err)
+		}
+	}
+
+	close(stop)
+	wg.Wait()
 }
