@@ -42,6 +42,13 @@ var (
 	// catches it immediately once a test does the same thing.
 	configPtr atomic.Pointer[StatterConfig]
 
+	// initGeneration counts the configurations Init has installed. A refresh loop is
+	// bound to the generation it was started for and retires itself as soon as a
+	// later Init installs another one - otherwise a loop left over from an earlier
+	// Init would keep rebuilding from its own address, prefix and tags and overwrite
+	// the client the current Init put in place.
+	initGeneration atomic.Uint64
+
 	traceProviderShutdownFn func(ctx context.Context) error
 	tracer                  trace.Tracer
 	mixPanelClient          *mixpanel.ApiClient
@@ -164,12 +171,10 @@ func Close() {
 
 func Init(addr string, prefix string, cfg *StatterConfig) error {
 	cfg = checkConfig(cfg)
-	setCurrentConfig(cfg)
+
 	if cfg.MockingEnabled {
 		// init a mock statter instead of real statsd client
-		clientMux.Lock()
-		client = newMockStatter(cfg)
-		clientMux.Unlock()
+		swapStatter(newMockStatter(cfg), cfg)
 		return nil
 	}
 
@@ -178,7 +183,7 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 		return err
 	}
 
-	swapStatter(statter)
+	swapStatter(statter, cfg)
 
 	// OpenTelemetry tracing via DataDog provider
 	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
@@ -267,12 +272,49 @@ func newStatter(addr, prefix string, cfg *StatterConfig) (Statter, error) {
 	return statter, nil
 }
 
-// swapStatter installs a new statter and closes the one it replaces. Init used to
-// overwrite the package-level client without closing it, which leaked the old
-// client's socket and flush goroutine on every re-init - harmless when Init ran
-// once per process, a slow leak now that the refresh loop calls it repeatedly.
-func swapStatter(statter Statter) {
+// swapStatter installs a statter built by Init, publishing the config it was built
+// from in the same critical section and closing the statter it replaces.
+//
+// Client and config go in together because the reporting path reads both under one
+// clientMux.RLock - JoinTags picks the tag format out of the config - so publishing
+// the config first would let a report format Telegraf tags for a Datadog client
+// that has not been replaced yet, and would leave that mismatch behind for good if
+// construction then failed.
+//
+// Closing the replaced statter matters too: Init used to overwrite the
+// package-level client without closing it, which leaked the old client's socket and
+// flush goroutine on every re-init - harmless when Init ran once per process, a slow
+// leak now that the refresh loop swaps repeatedly.
+//
+// The returned generation is the one the caller's refresh loop should run under.
+func swapStatter(statter Statter, cfg *StatterConfig) uint64 {
 	clientMux.Lock()
+	previous := client
+	client = statter
+	setCurrentConfig(cfg)
+	gen := initGeneration.Add(1)
+	clientMux.Unlock()
+
+	if previous != nil {
+		_ = previous.Close()
+	}
+
+	return gen
+}
+
+// refreshStatter installs a rebuilt statter, but only while gen is still the current
+// generation. A refresh loop holds the addr, prefix and config of the Init that
+// started it; if a later Init has since installed different ones, letting this swap
+// through would put the older Init's destination and tag format back in place. It
+// reports false when that has happened, which is the loop's signal to stop.
+func refreshStatter(statter Statter, gen uint64) bool {
+	clientMux.Lock()
+	if initGeneration.Load() != gen {
+		clientMux.Unlock()
+		_ = statter.Close()
+		return false
+	}
+
 	previous := client
 	client = statter
 	clientMux.Unlock()
@@ -280,6 +322,8 @@ func swapStatter(statter Statter) {
 	if previous != nil {
 		_ = previous.Close()
 	}
+
+	return true
 }
 
 // statterNeedsRefresh reports whether this agent talks over a connectionless
@@ -311,7 +355,11 @@ func statterNeedsRefresh(agent string) bool {
 // only the pod behind it. Rebuilding the socket is what recovers, so that is what
 // this does. It is cheap - a UDP dial, no handshake - and the old client is closed,
 // which flushes whatever it had buffered.
-func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterConfig, interval time.Duration) {
+//
+// The loop belongs to the Init generation named by gen and stops as soon as a later
+// Init supersedes it, so it can never put an earlier Init's destination or tag
+// format back in place.
+func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterConfig, interval time.Duration, gen uint64) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
@@ -329,7 +377,10 @@ func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterC
 				continue
 			}
 
-			swapStatter(statter)
+			if !refreshStatter(statter, gen) {
+				// A later Init owns the client now, and started its own refresh for it.
+				return
+			}
 		}
 	}
 }
@@ -346,7 +397,12 @@ func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterC
 // It is a no-op when Init has not run, when metrics are mocked, and for agents that
 // manage their own connection - see statterNeedsRefresh.
 func StartRefresh(ctx context.Context, addr, prefix string, interval time.Duration) {
+	// Read the config and the generation it was installed under together, so the loop
+	// is bound to the Init that actually produced the config it will rebuild from.
+	clientMux.RLock()
 	cfg := currentConfig()
+	gen := initGeneration.Load()
+	clientMux.RUnlock()
 
 	if cfg.Agent == "" || cfg.MockingEnabled || !statterNeedsRefresh(cfg.Agent) {
 		return
@@ -356,7 +412,7 @@ func StartRefresh(ctx context.Context, addr, prefix string, interval time.Durati
 		interval = DefaultRefreshInterval
 	}
 
-	go startStatterRefresh(ctx, addr, prefix, cfg, interval)
+	go startStatterRefresh(ctx, addr, prefix, cfg, interval, gen)
 }
 
 type ServiceConfig struct {
@@ -432,8 +488,8 @@ func InitService(ctx context.Context, cfg ServiceConfig) (func(timeout time.Dura
 		break
 	}
 
-	if refresh := cfg.refreshInterval(); refresh > 0 && !cfg.MockingEnabled && statterNeedsRefresh(cfg.AgentID) {
-		go startStatterRefresh(ctx, cfg.AgentAddress, cfg.normalizePrefix(), currentConfig(), refresh)
+	if refresh := cfg.refreshInterval(); refresh > 0 {
+		StartRefresh(ctx, cfg.AgentAddress, cfg.normalizePrefix(), refresh)
 	}
 
 	return CloseWithTimeout, nil

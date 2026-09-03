@@ -23,7 +23,7 @@ var DefaultCloseTimeout = time.Second * 10
 // caller has not chosen a cadence. Five minutes is a compromise: long enough that
 // the rebuild is invisible next to a 2s reporting interval, short enough that a
 // process cannot spend hours reporting into a socket that goes nowhere.
-var DefaultRefreshInterval = time.Minute * 5
+const DefaultRefreshInterval = time.Minute * 5
 
 func ReportFunc(fn, action string, tags ...Tags) {
 	reportFunc(fn, action, tags...)

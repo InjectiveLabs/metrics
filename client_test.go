@@ -54,6 +54,31 @@ func resetClientGlobals(t *testing.T) {
 	})
 }
 
+// runRefresh starts a refresh loop for the generation currently installed and, on
+// cleanup, cancels it and waits for it to actually exit.
+//
+// The waiting is the point: cancel() does not abandon a tick the loop has already
+// selected, so without the join a swap can land after the test returns and replace
+// the package client while the next test is asserting on it. Call it after
+// resetClientGlobals so that this cleanup, being registered later, runs first.
+func runRefresh(t *testing.T, addr, prefix string, cfg *StatterConfig, interval time.Duration) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	gen := initGeneration.Load()
+
+	go func() {
+		startStatterRefresh(ctx, addr, prefix, cfg, interval, gen)
+		close(done)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
 func TestBaseTags(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -134,11 +159,11 @@ func TestSwapStatterClosesReplacedClient(t *testing.T) {
 	first := &countingStatter{}
 	second := &countingStatter{}
 
-	swapStatter(first)
+	swapStatter(first, &StatterConfig{Agent: TelegrafAgent})
 	assert.Same(t, first, currentClient())
 	assert.Equal(t, 0, first.closeCount(), "installing the first client must not close it")
 
-	swapStatter(second)
+	swapStatter(second, &StatterConfig{Agent: TelegrafAgent})
 	assert.Same(t, second, currentClient(), "the new client must be the one in use")
 	assert.Equal(t, 1, first.closeCount(), "the replaced client must be closed, or its socket leaks")
 	assert.Equal(t, 0, second.closeCount())
@@ -148,7 +173,7 @@ func TestSwapStatterFromEmpty(t *testing.T) {
 	resetClientGlobals(t)
 
 	// The very first swap has nothing to close and must not panic on the nil client.
-	assert.NotPanics(t, func() { swapStatter(&countingStatter{}) })
+	assert.NotPanics(t, func() { swapStatter(&countingStatter{}, &StatterConfig{Agent: TelegrafAgent}) })
 }
 
 func TestStatterNeedsRefresh(t *testing.T) {
@@ -192,15 +217,11 @@ func TestStartStatterRefreshRebuildsAndClosesTheOldClient(t *testing.T) {
 	resetClientGlobals(t)
 
 	cfg := &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"}
-	setCurrentConfig(cfg)
 
 	initial := &countingStatter{}
-	swapStatter(initial)
+	swapStatter(initial, cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go startStatterRefresh(ctx, "127.0.0.1:8125", "test.", cfg, 20*time.Millisecond)
+	runRefresh(t, "127.0.0.1:8125", "test.", cfg, 20*time.Millisecond)
 
 	// The refresh must replace the client it found in place, and close it on the way
 	// out - that swap is the whole point: a socket that no longer reaches the agent
@@ -222,7 +243,7 @@ func TestStartStatterRefreshStopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		startStatterRefresh(ctx, "127.0.0.1:8125", "test.", cfg, time.Hour)
+		startStatterRefresh(ctx, "127.0.0.1:8125", "test.", cfg, time.Hour, initGeneration.Load())
 		close(done)
 	}()
 
@@ -242,15 +263,11 @@ func TestStartStatterRefreshKeepsClientWhenRebuildFails(t *testing.T) {
 	// has to survive that: a client that might still work beats a nil one, which
 	// drops every metric silently.
 	cfg := &StatterConfig{Agent: "nonexistent-agent"}
-	setCurrentConfig(cfg)
 
 	initial := &countingStatter{}
-	swapStatter(initial)
+	swapStatter(initial, cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go startStatterRefresh(ctx, "127.0.0.1:8125", "test.", cfg, 10*time.Millisecond)
+	runRefresh(t, "127.0.0.1:8125", "test.", cfg, 10*time.Millisecond)
 
 	time.Sleep(150 * time.Millisecond)
 
@@ -271,10 +288,9 @@ func TestStartRefreshIsANoOpWhenItCannotHelp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetClientGlobals(t)
-			setCurrentConfig(tt.cfg)
 
 			initial := &countingStatter{}
-			swapStatter(initial)
+			swapStatter(initial, tt.cfg)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -290,10 +306,9 @@ func TestStartRefreshIsANoOpWhenItCannotHelp(t *testing.T) {
 
 func TestStartRefreshRebuildsForUDPAgents(t *testing.T) {
 	resetClientGlobals(t)
-	setCurrentConfig(&StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"})
 
 	initial := &countingStatter{}
-	swapStatter(initial)
+	swapStatter(initial, &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -323,11 +338,14 @@ func TestInitConcurrentWithReporting_IsRaceFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind sink: %v", err)
 	}
-	defer sink.Close()
+	t.Cleanup(func() {
+		if err := sink.Close(); err != nil {
+			t.Errorf("close UDP sink: %v", err)
+		}
+	})
 	addr := sink.LocalAddr().String()
 
-	setCurrentConfig(&StatterConfig{Agent: TelegrafAgent, EnvName: "test", HostName: "host"})
-	swapStatter(&countingStatter{})
+	swapStatter(&countingStatter{}, &StatterConfig{Agent: TelegrafAgent, EnvName: "test", HostName: "host"})
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -361,4 +379,69 @@ func TestInitConcurrentWithReporting_IsRaceFree(t *testing.T) {
 
 	close(stop)
 	wg.Wait()
+}
+
+// A refresh loop outlives the Init that started it only until the next Init. Without
+// the generation guard, a loop left over from an earlier Init keeps rebuilding from
+// its own address, prefix and tags, and the first tick after a re-init hands the
+// process a client pointed at the previous destination with the previous tag format.
+func TestRefreshFromASupersededInitRetiresItself(t *testing.T) {
+	resetClientGlobals(t)
+
+	staleCfg := &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"}
+	staleGen := swapStatter(&countingStatter{}, staleCfg)
+
+	// A later Init: different destination, different agent, new generation.
+	currentCfg := &StatterConfig{Agent: TelegrafAgent, EnvName: "test", HostName: "host"}
+	current := &countingStatter{}
+	swapStatter(current, currentCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		startStatterRefresh(ctx, "127.0.0.1:8125", "stale.", staleCfg, 10*time.Millisecond, staleGen)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a superseded refresh loop must stop on its own, not keep swapping")
+	}
+
+	assert.Same(t, current, currentClient(), "a stale refresh must not replace what a later Init installed")
+	assert.Equal(t, 0, current.closeCount(), "the live client must not be closed by a stale refresh")
+	assert.Equal(t, TelegrafAgent, currentConfig().Agent, "a stale refresh must not restore the older config")
+}
+
+func TestInitClosesThePreviousClientWhenSwitchingToMocking(t *testing.T) {
+	resetClientGlobals(t)
+
+	previous := &countingStatter{}
+	swapStatter(previous, &StatterConfig{Agent: TelegrafAgent})
+
+	require.NoError(t, Init("127.0.0.1:8125", "test.", &StatterConfig{
+		Agent: TelegrafAgent, MockingEnabled: true,
+	}))
+
+	assert.NotSame(t, previous, currentClient(), "mocking must take over the client")
+	assert.Equal(t, 1, previous.closeCount(), "switching to mocking must close the real client, or its socket leaks")
+}
+
+// The config is what JoinTags reads to pick the tag format, so publishing it before
+// the client it belongs to would have reports formatting tags for a client that does
+// not exist yet - and would leave that mismatch in place for good if the build failed.
+func TestInitLeavesTheWorkingClientAndItsConfigWhenConstructionFails(t *testing.T) {
+	resetClientGlobals(t)
+
+	working := &countingStatter{}
+	swapStatter(working, &StatterConfig{Agent: TelegrafAgent, EnvName: "test", HostName: "host"})
+
+	require.Error(t, Init("127.0.0.1:8125", "test.", &StatterConfig{Agent: "nonexistent-agent"}))
+
+	assert.Same(t, working, currentClient(), "a failed Init must leave the working client in place")
+	assert.Equal(t, 0, working.closeCount())
+	assert.Equal(t, TelegrafAgent, currentConfig().Agent, "a failed Init must not publish the config it could not build")
 }
