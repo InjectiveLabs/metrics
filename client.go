@@ -49,6 +49,14 @@ var (
 	// the client the current Init put in place.
 	initGeneration atomic.Uint64
 
+	// generationSuperseded is closed when a later Init installs the next generation.
+	// The generation number alone is only checked once a rebuild is already in hand,
+	// so a superseded loop would otherwise sit on its ticker for a full interval -
+	// five minutes by default - and then dial the old destination once more before
+	// noticing it has been replaced. Closing the channel retires it at once. Guarded
+	// by clientMux together with the counter it tracks.
+	generationSuperseded = make(chan struct{})
+
 	traceProviderShutdownFn func(ctx context.Context) error
 	tracer                  trace.Tracer
 	mixPanelClient          *mixpanel.ApiClient
@@ -183,17 +191,56 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 		return err
 	}
 
+	// Tracing and profiling can both fail, and a failed Init must leave the process
+	// reporting through whatever it was already using. So they run before the swap:
+	// until every step that can return an error has passed, the candidate statter is
+	// not published, and on failure it is closed rather than left holding a socket
+	// nobody will ever read from again.
+	if err := setupTracingFn(addr, prefix, cfg); err != nil {
+		_ = statter.Close()
+		return err
+	}
+
+	if cfg.Agent == DatadogAgent && cfg.ProfilingEnabled {
+		if err := setupProfiler(cfg); err != nil {
+			_ = statter.Close()
+			return err
+		}
+	}
+
 	swapStatter(statter, cfg)
 
+	if cfg.MixPanelEnabled {
+		StartMixPanel(cfg.MixPanelProjectToken)
+	}
+
+	return nil
+}
+
+// setupTracingFn is the tracing step Init runs. Indirected only so a test can fail
+// the step that comes after a successful statter build, which is the case that used
+// to throw away a working client.
+var setupTracingFn = setupTracing
+
+// setupTracing wires the process-global tracer provider for the configured agent.
+// Split out of Init so that everything able to fail sits in one place ahead of the
+// client swap; it is a no-op unless tracing is on for an agent that supports it.
+func setupTracing(addr, prefix string, cfg *StatterConfig) error {
+	if !cfg.TracingEnabled {
+		return nil
+	}
+
+	switch cfg.Agent {
 	// OpenTelemetry tracing via DataDog provider
-	if cfg.Agent == DatadogAgent && cfg.TracingEnabled {
+	case DatadogAgent:
 		traceProvider := ddotel.NewTracerProvider()
 		otel.SetTracerProvider(traceProvider)
 		tracer = otel.Tracer("")
 		traceProviderShutdownFn = func(_ context.Context) error {
 			return traceProvider.Shutdown()
 		}
-	} else if cfg.Agent == OTELAgent && cfg.TracingEnabled {
+
+	case OTELAgent:
 		traceProvider, err := newOTELTracerProvider(addr, cfg.OTELInsecure, cfg.OTELHeaders, cfg.BaseTags())
 		if err != nil {
 			return errors.Wrap(err, "otel tracer provider init failed")
@@ -207,17 +254,6 @@ func Init(addr string, prefix string, cfg *StatterConfig) error {
 		traceProviderShutdownFn = func(ctx context.Context) error {
 			return traceProvider.Shutdown(ctx)
 		}
-	}
-
-	if cfg.Agent == DatadogAgent && cfg.ProfilingEnabled {
-		err = setupProfiler(cfg)
-		if err != nil {
-			return err
-		}
-	}
-
-	if cfg.MixPanelEnabled {
-		StartMixPanel(cfg.MixPanelProjectToken)
 	}
 
 	return nil
@@ -286,20 +322,39 @@ func newStatter(addr, prefix string, cfg *StatterConfig) (Statter, error) {
 // flush goroutine on every re-init - harmless when Init ran once per process, a slow
 // leak now that the refresh loop swaps repeatedly.
 //
-// The returned generation is the one the caller's refresh loop should run under.
-func swapStatter(statter Statter, cfg *StatterConfig) uint64 {
+// The returned generation and channel are what the caller's refresh loop runs under:
+// the loop stops when the channel closes, which happens on the next swap.
+func swapStatter(statter Statter, cfg *StatterConfig) (uint64, <-chan struct{}) {
 	clientMux.Lock()
 	previous := client
 	client = statter
 	setCurrentConfig(cfg)
 	gen := initGeneration.Add(1)
+
+	// Retire the loops belonging to the generation being replaced, then hand the
+	// new one its own signal.
+	close(generationSuperseded)
+	generationSuperseded = make(chan struct{})
+	superseded := generationSuperseded
 	clientMux.Unlock()
 
 	if previous != nil {
 		_ = previous.Close()
 	}
 
-	return gen
+	return gen, superseded
+}
+
+// activeInit returns everything a refresh loop needs to be bound to one Init: the
+// config it should rebuild from, the generation that config was installed under, and
+// the channel closed when a later Init supersedes it. All three come out of a single
+// lock, so a loop can never be handed the config of one Init and the generation of
+// another - which would let it rebuild a stale destination that the generation check
+// then waves through as current.
+func activeInit() (*StatterConfig, uint64, <-chan struct{}) {
+	clientMux.RLock()
+	defer clientMux.RUnlock()
+	return currentConfig(), initGeneration.Load(), generationSuperseded
 }
 
 // refreshStatter installs a rebuilt statter, but only while gen is still the current
@@ -357,15 +412,19 @@ func statterNeedsRefresh(agent string) bool {
 // which flushes whatever it had buffered.
 //
 // The loop belongs to the Init generation named by gen and stops as soon as a later
-// Init supersedes it, so it can never put an earlier Init's destination or tag
-// format back in place.
-func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterConfig, interval time.Duration, gen uint64) {
+// Init supersedes it - immediately, on the superseded signal, rather than at the next
+// tick - so it can never put an earlier Init's destination or tag format back in
+// place, nor dial the old destination once more on its way out.
+func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterConfig, interval time.Duration, gen uint64, superseded <-chan struct{}) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-superseded:
+			// A later Init owns the client now and started its own refresh for it.
 			return
 		case <-t.C:
 			statter, err := newStatter(addr, prefix, cfg)
@@ -377,8 +436,9 @@ func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterC
 				continue
 			}
 
+			// The generation check is still needed: an Init can land between the
+			// tick and the swap, after this loop has read the signal as open.
 			if !refreshStatter(statter, gen) {
-				// A later Init owns the client now, and started its own refresh for it.
 				return
 			}
 		}
@@ -397,22 +457,31 @@ func startStatterRefresh(ctx context.Context, addr, prefix string, cfg *StatterC
 // It is a no-op when Init has not run, when metrics are mocked, and for agents that
 // manage their own connection - see statterNeedsRefresh.
 func StartRefresh(ctx context.Context, addr, prefix string, interval time.Duration) {
-	// Read the config and the generation it was installed under together, so the loop
-	// is bound to the Init that actually produced the config it will rebuild from.
-	clientMux.RLock()
-	cfg := currentConfig()
-	gen := initGeneration.Load()
-	clientMux.RUnlock()
+	startRefresh(ctx, addr, prefix, interval)
+}
+
+// startRefresh is StartRefresh with a handle on the loop it starts: it returns a
+// channel closed once the loop has exited, or nil when there was no loop to start.
+// The tests join on it, so a rebuild can never land after the test that started it
+// has already reset the package globals.
+func startRefresh(ctx context.Context, addr, prefix string, interval time.Duration) <-chan struct{} {
+	cfg, gen, superseded := activeInit()
 
 	if cfg.Agent == "" || cfg.MockingEnabled || !statterNeedsRefresh(cfg.Agent) {
-		return
+		return nil
 	}
 
 	if interval <= 0 {
 		interval = DefaultRefreshInterval
 	}
 
-	go startStatterRefresh(ctx, addr, prefix, cfg, interval, gen)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		startStatterRefresh(ctx, addr, prefix, cfg, interval, gen, superseded)
+	}()
+
+	return done
 }
 
 type ServiceConfig struct {

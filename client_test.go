@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -66,12 +67,28 @@ func runRefresh(t *testing.T, addr, prefix string, cfg *StatterConfig, interval 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	gen := initGeneration.Load()
+	_, gen, superseded := activeInit()
 
 	go func() {
-		startStatterRefresh(ctx, addr, prefix, cfg, interval, gen)
+		startStatterRefresh(ctx, addr, prefix, cfg, interval, gen, superseded)
 		close(done)
 	}()
+
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
+// joinRefresh runs the public StartRefresh path and, on cleanup, cancels the loop and
+// waits for it to exit - the same join runRefresh does, and for the same reason.
+// It fails the test if no loop was started. Call it after resetClientGlobals.
+func joinRefresh(t *testing.T, addr, prefix string, interval time.Duration) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startRefresh(ctx, addr, prefix, interval)
+	require.NotNil(t, done, "a refresh loop should have started")
 
 	t.Cleanup(func() {
 		cancel()
@@ -241,9 +258,10 @@ func TestStartStatterRefreshStopsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	_, gen, superseded := activeInit()
 	done := make(chan struct{})
 	go func() {
-		startStatterRefresh(ctx, "127.0.0.1:8125", "test.", cfg, time.Hour, initGeneration.Load())
+		startStatterRefresh(ctx, "127.0.0.1:8125", "test.", cfg, time.Hour, gen, superseded)
 		close(done)
 	}()
 
@@ -295,10 +313,9 @@ func TestStartRefreshIsANoOpWhenItCannotHelp(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			StartRefresh(ctx, "127.0.0.1:8125", "test.", 10*time.Millisecond)
-			time.Sleep(120 * time.Millisecond)
-
-			assert.Same(t, initial, currentClient(), "no refresh loop should have started")
+			assert.Nil(t, startRefresh(ctx, "127.0.0.1:8125", "test.", 10*time.Millisecond),
+				"no refresh loop should have started")
+			assert.Same(t, initial, currentClient())
 			assert.Equal(t, 0, initial.closeCount())
 		})
 	}
@@ -310,10 +327,7 @@ func TestStartRefreshRebuildsForUDPAgents(t *testing.T) {
 	initial := &countingStatter{}
 	swapStatter(initial, &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	StartRefresh(ctx, "127.0.0.1:8125", "test.", 20*time.Millisecond)
+	joinRefresh(t, "127.0.0.1:8125", "test.", 20*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		return currentClient() != Statter(initial)
@@ -389,7 +403,7 @@ func TestRefreshFromASupersededInitRetiresItself(t *testing.T) {
 	resetClientGlobals(t)
 
 	staleCfg := &StatterConfig{Agent: DatadogAgent, EnvName: "test", HostName: "host"}
-	staleGen := swapStatter(&countingStatter{}, staleCfg)
+	staleGen, staleSuperseded := swapStatter(&countingStatter{}, staleCfg)
 
 	// A later Init: different destination, different agent, new generation.
 	currentCfg := &StatterConfig{Agent: TelegrafAgent, EnvName: "test", HostName: "host"}
@@ -401,19 +415,46 @@ func TestRefreshFromASupersededInitRetiresItself(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		startStatterRefresh(ctx, "127.0.0.1:8125", "stale.", staleCfg, 10*time.Millisecond, staleGen)
+		startStatterRefresh(ctx, "127.0.0.1:8125", "stale.", staleCfg, time.Hour, staleGen, staleSuperseded)
 		close(done)
 	}()
 
+	// The interval is an hour: a loop that only noticed on its ticker would still be
+	// sitting there, holding the previous destination and tag format, long after the
+	// Init that replaced it returned.
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("a superseded refresh loop must stop on its own, not keep swapping")
+		t.Fatal("a superseded refresh loop must retire at once, not wait out its interval")
 	}
 
 	assert.Same(t, current, currentClient(), "a stale refresh must not replace what a later Init installed")
 	assert.Equal(t, 0, current.closeCount(), "the live client must not be closed by a stale refresh")
 	assert.Equal(t, TelegrafAgent, currentConfig().Agent, "a stale refresh must not restore the older config")
+}
+
+// Init used to publish the new client before tracing and profiling setup, both of
+// which can fail. A failure then returned an error having already closed the client
+// the process was reporting through, and left the new config published behind it.
+func TestInitKeepsTheWorkingClientWhenSetupAfterTheSwapFails(t *testing.T) {
+	resetClientGlobals(t)
+
+	working := &countingStatter{}
+	swapStatter(working, &StatterConfig{Agent: TelegrafAgent, EnvName: "test", HostName: "host"})
+
+	original := setupTracingFn
+	t.Cleanup(func() { setupTracingFn = original })
+	setupTracingFn = func(string, string, *StatterConfig) error {
+		return errors.New("tracer provider init failed")
+	}
+
+	require.Error(t, Init("127.0.0.1:8125", "new.", &StatterConfig{
+		Agent: DatadogAgent, EnvName: "new", HostName: "host", TracingEnabled: true,
+	}))
+
+	assert.Same(t, working, currentClient(), "a failed Init must leave the working client in place")
+	assert.Equal(t, 0, working.closeCount(), "the working client must not be closed by an Init that failed")
+	assert.Equal(t, TelegrafAgent, currentConfig().Agent, "a failed Init must not publish its config")
 }
 
 func TestInitClosesThePreviousClientWhenSwitchingToMocking(t *testing.T) {

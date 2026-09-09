@@ -32,8 +32,11 @@ closed, which flushes whatever it had buffered.
   `ServiceConfig.RefreshInterval`, or set that to a negative value to switch it off.
 - Callers that use `Init` directly should call `StartRefresh(ctx, addr, prefix, 0)`
   once afterwards.
-- A later `Init` retires the loop the previous one started, so a re-init cannot leave
-  a refresh rebuilding for the address and tag format of the config it replaced.
+- A later `Init` retires the loop the previous one started, immediately rather than
+  at that loop's next tick, so a re-init cannot leave a refresh rebuilding for the
+  address and tag format of the config it replaced.
+- An `Init` that fails leaves the previous client and config in place; nothing is
+  published until every step that can fail has succeeded.
 
 OTEL is deliberately left alone: it exports over gRPC/HTTP, which redials on its own.
 
