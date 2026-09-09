@@ -19,6 +19,12 @@ import (
 
 var DefaultCloseTimeout = time.Second * 10
 
+// DefaultRefreshInterval is how often the UDP statsd client is rebuilt when the
+// caller has not chosen a cadence. Five minutes is a compromise: long enough that
+// the rebuild is invisible next to a 2s reporting interval, short enough that a
+// process cannot spend hours reporting into a socket that goes nowhere.
+const DefaultRefreshInterval = time.Minute * 5
+
 func ReportFunc(fn, action string, tags ...Tags) {
 	reportFunc(fn, action, tags...)
 }
@@ -166,7 +172,7 @@ func reportTiming(ctx context.Context, fn string, tags ...Tags) (context.Context
 
 	doneC := make(chan struct{})
 	go func(name string, start time.Time) {
-		timeout := time.NewTimer(config.StuckFunctionTimeout)
+		timeout := time.NewTimer(currentConfig().StuckFunctionTimeout)
 		defer timeout.Stop()
 
 		select {
@@ -213,7 +219,7 @@ func ReportClosureFuncTiming(name string, tags ...Tags) StopTimerFunc {
 
 	doneC := make(chan struct{})
 	go func(name string, start time.Time) {
-		timeout := time.NewTimer(config.StuckFunctionTimeout)
+		timeout := time.NewTimer(currentConfig().StuckFunctionTimeout)
 		defer timeout.Stop()
 
 		select {
@@ -391,7 +397,7 @@ func joinDDTags(tags ...Tags) []string {
 
 // JoinTags decides how to join tags base on agent
 func JoinTags(tags ...Tags) []string {
-	if config.Agent == DatadogAgent {
+	if currentConfig().Agent == DatadogAgent {
 		return joinDDTags(tags...)
 	}
 
@@ -399,7 +405,7 @@ func JoinTags(tags ...Tags) []string {
 }
 
 func getSingleTag(key, value string) string {
-	if config.Agent == DatadogAgent {
+	if currentConfig().Agent == DatadogAgent {
 		return fmt.Sprintf("%s:%s", key, value)
 	}
 
