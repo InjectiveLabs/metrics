@@ -105,3 +105,68 @@ It is implemented via new FlightRecorder in go (code). Can be enabled via `--tra
 ```
 go tool trace trace-64240020.out
 ```
+
+## Transaction tracing
+
+Transaction stage helpers use the existing meter's tracer and OTLP exporter.
+They are enabled by the existing `TracingEnabled` configuration. There is no
+additional transaction sampler in these helpers; scope the initial rollout and
+measure span volume before enabling instrumentation across a fleet. The shared
+OpenTelemetry provider controls recording and export. Disabled or unsupported
+meters do not hash transaction bytes.
+
+Export is best effort through the existing bounded batch queue. A full queue
+drops spans instead of blocking transaction processing, and exporter failures
+are reported to the OpenTelemetry error handler. The current instance-local
+provider does not expose a queue-drop counter by default. A missing span can
+reflect export loss or incomplete instrumentation; it cannot prove that a
+transaction never reached a node. Verify collector health and observation
+coverage before interpreting gaps.
+
+```go
+if metrics.TransactionTracingEnabled(meter) {
+	ctx, span := metrics.StartTransactionSpan(ctx, meter, signedTransactionBytes,
+		"tx.mempool.check", metrics.TraceTag("source", "rpc"))
+	defer span.End()
+	// Existing FuncTimingCtx / FuncTiming calls using ctx inherit tx_hash in
+	// their trace spans, without adding it to metric attributes.
+	_ = ctx
+}
+```
+
+`StartTransactionSpan` creates a span only: it does not emit function counters or
+histograms, create a watchdog goroutine, or retain signed transaction bytes. It
+sets `tx_hash` to uppercase SHA256 of the exact bytes. A nil transaction argument
+reuses the hash in the incoming context; non-nil bytes establish a new hash.
+`tx_stage` is always the stage's span name, independent of caller-provided tags.
+Other tags belong to the current stage and are not inherited by later stages.
+Stage names and outcome labels should be fixed values. Do not attach signed
+bytes, authentication data, raw application errors or other unbounded payloads.
+
+Use `DetachTransactionContext(ctx)` before handing work to a callback or storing
+an admitted entry's context. It preserves only the OpenTelemetry span identity
+and the fixed transaction hash, dropping request cancellation, deadlines and
+arbitrary request values. Request cancellation must not erase a later inclusion
+observation. A disabled helper returns the original context and an inert span;
+mutate the returned span rather than a recording parent obtained from the
+incoming context. Preserving the context lets other enabled components continue
+the same local trace.
+
+For a point observation, capture the boundary time before a batch loop and use:
+
+```go
+metrics.RecordTransactionEvent(ctx, meter, signedTransactionBytes,
+	"tx.block.committed", observedAt, metrics.TraceTag("height", height))
+```
+
+The event is exported as a span with identical start and end timestamps. Its
+timestamp means the specific local boundary being instrumented, not the block
+header time or another node's observation.
+
+The hash is a trace attribute and a join key, never an OpenTelemetry trace ID or
+a metric dimension. Record chain ID, node ID, process/session identity and build
+revision as deployment resource attributes. Independently received transactions
+on different nodes create independent traces that analysis can correlate by
+chain ID and hash. This does not invent a distributed parent/child relationship
+where the wire protocol carries no trace context. Comparing timestamps between
+nodes requires synchronized clocks and known observation coverage.

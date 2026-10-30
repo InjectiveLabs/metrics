@@ -97,11 +97,11 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribu
 	start := time.Now()
 
 	var (
-		span    trace.Span
+		span trace.Span
 	)
 
 	if m.tracer != nil {
-		ctx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(toAttrs(m.getMergedTraceTags(tags...))...))
+		ctx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(transactionSpanAttributes(ctx, m, tags)...))
 	}
 
 	// func timeout watchdog

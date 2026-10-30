@@ -50,6 +50,30 @@ func TraceTag[V string | int64 | bool](k string, v V) TagAttrTrace {
 	return TagAttrTrace(Tag(k, v))
 }
 
+// WithTraceTags decorates a meter without changing its instrumentation scope or
+// adding metric dimensions. It leaves the original meter and its tags untouched.
+// Unsupported custom meters and nil meters are returned unchanged.
+func WithTraceTags(instrument Meter, tags ...TagAttrTrace) Meter {
+	scoped, supported := instrument.(*meter)
+	if !supported || scoped == nil || len(tags) == 0 {
+		return instrument
+	}
+	baseTags := make([]TagAttribute, len(scoped.baseTags), len(scoped.baseTags)+len(tags))
+	copy(baseTags, scoped.baseTags)
+	for _, tag := range tags {
+		baseTags = append(baseTags, tag)
+	}
+	// Do not copy the meter's mutex-bearing instrument caches. The underlying
+	// OpenTelemetry meter already returns the same instruments for this scope.
+	return &meter{
+		Meter:    scoped.Meter,
+		name:     scoped.name,
+		metrics:  scoped.metrics,
+		tracer:   scoped.tracer,
+		baseTags: baseTags,
+	}
+}
+
 // MetricTag only adds a new attribute to a metrics data, avoiding tracing span
 func MetricTag[V string | int64 | bool](k string, v V) TagAttrMetric {
 	return TagAttrMetric(Tag(k, v))
@@ -65,7 +89,8 @@ func (m *meter) getMergedTags(tags ...TagAttribute) []TagAttribute {
 		return m.baseTags
 	}
 	mergedTags := make([]TagAttribute, 0, len(m.baseTags)+len(tags))
-	mergedTags = append(append(mergedTags, m.baseTags...), tags...)
+	mergedTags = append(mergedTags, m.baseTags...)
+	mergedTags = append(mergedTags, tags...)
 
 	return mergedTags
 }
@@ -79,17 +104,18 @@ func (m *meter) getMergedTraceTags(tags ...TagAttribute) []TagAttribute {
 	for i, tag := range mergedTags {
 		switch tag.Type() {
 		case forMetric: // we need to filter this tag
-			if len(filteredTags) == 0 { // if it's a first tag to omit, initialize filtered slice
-				filteredTags = append([]TagAttribute{}, mergedTags[:i]...)
+			if filteredTags == nil { // initialize even when the first tag is excluded
+				filteredTags = make([]TagAttribute, i, len(mergedTags))
+				copy(filteredTags, mergedTags[:i])
 			}
 		default: // include this tag, but only if we need to filter anything
-			if len(filteredTags) > 0 {
+			if filteredTags != nil {
 				filteredTags = append(filteredTags, tag)
 			}
 		}
 	}
 
-	if len(filteredTags) > 0 { // if we filtered anything
+	if filteredTags != nil { // if we filtered anything
 		return filteredTags
 	}
 
@@ -105,17 +131,18 @@ func (m *meter) getMergedMetricTags(tags ...TagAttribute) []TagAttribute {
 	for i, tag := range mergedTags {
 		switch tag.Type() {
 		case forTrace: // we need to filter this tag
-			if len(filteredTags) == 0 { // if it's a first tag to omit, initialize filtered slice
-				filteredTags = append([]TagAttribute{}, mergedTags[:i]...)
+			if filteredTags == nil { // initialize even when the first tag is excluded
+				filteredTags = make([]TagAttribute, i, len(mergedTags))
+				copy(filteredTags, mergedTags[:i])
 			}
 		default: // include this tag, but only if we need to filter anything
-			if len(filteredTags) > 0 {
+			if filteredTags != nil {
 				filteredTags = append(filteredTags, tag)
 			}
 		}
 	}
 
-	if len(filteredTags) > 0 { // if we filtered anything
+	if filteredTags != nil { // if we filtered anything
 		return filteredTags
 	}
 
