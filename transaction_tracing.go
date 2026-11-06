@@ -40,6 +40,39 @@ func TransactionTracingEnabled(meter Meter) bool {
 	return supported && provider.TransactionTracer() != nil
 }
 
+// gossipTraceSwitches is implemented by the library's meter. Custom Meter
+// implementations keep gossip tracing disabled.
+type gossipTraceSwitches interface {
+	GossipReceiveTracingEnabled() bool
+	GossipSendTracingEnabled() bool
+}
+
+// GossipReceiveTracingEnabled reports whether the receive side of transaction
+// gossip should be traced: tracing is on and trace-gossip-receive is set.
+func (m *meter) GossipReceiveTracingEnabled() bool {
+	return m.TransactionTracer() != nil && m.metrics.cfg.TraceGossipReceive
+}
+
+// GossipSendTracingEnabled reports whether the send side of transaction gossip
+// should be traced: tracing is on and trace-gossip-send is set.
+func (m *meter) GossipSendTracingEnabled() bool {
+	return m.TransactionTracer() != nil && m.metrics.cfg.TraceGossipSend
+}
+
+// GossipReceiveTracingEnabled lets a reactor skip hashing and span creation
+// for received transactions unless the operator asked for them.
+func GossipReceiveTracingEnabled(meter Meter) bool {
+	switches, supported := meter.(gossipTraceSwitches)
+	return supported && switches.GossipReceiveTracingEnabled()
+}
+
+// GossipSendTracingEnabled is the send-side counterpart of
+// GossipReceiveTracingEnabled.
+func GossipSendTracingEnabled(meter Meter) bool {
+	switches, supported := meter.(gossipTraceSwitches)
+	return supported && switches.GossipSendTracingEnabled()
+}
+
 // StartTransactionSpan starts a span without creating metric instruments or
 // timeout goroutines. Non-nil transaction bytes establish the canonical uppercase
 // SHA256 tx_hash; nil reuses correlation metadata already carried by ctx.

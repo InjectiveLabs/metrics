@@ -11,6 +11,11 @@ type Config struct {
 	MetricsEnabled bool `mapstructure:"metrics-enabled"` // whether metrics collections should be enabled
 	TracingEnabled bool `mapstructure:"tracing-enabled"` // whether tracing should be enabled
 
+	// Gossip spans are one per transaction per peer, so they stay off until
+	// asked for, even with tracing enabled.
+	TraceGossipReceive bool `mapstructure:"trace-gossip-receive"` // record a span for every transaction received from a peer
+	TraceGossipSend    bool `mapstructure:"trace-gossip-send"`    // record spans for every transaction sent to a peer
+
 	// time after which block is considered slow and flight recorder should dump the profile to disk.
 	// 0 - disables flight recorder.
 	FlightRecorderThreshold time.Duration `mapstructure:"flight-recorder-threshold"`

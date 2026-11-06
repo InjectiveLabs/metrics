@@ -242,6 +242,65 @@ func TestTransactionHashChangesWithTransactionBytes(t *testing.T) {
 	}
 }
 
+func gossipSwitchTestMeter(t *testing.T, cfg Config) Meter {
+	t.Helper()
+	providers := &Metrics{
+		cfg:            cfg,
+		tracerProvider: sdktrace.NewTracerProvider(),
+	}
+	t.Cleanup(func() { _ = providers.tracerProvider.Shutdown(context.Background()) })
+	meter, err := providers.NewMeter("gossip-switch-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return meter
+}
+
+func TestGossipTracingSwitches(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		cfg           Config
+		expectReceive bool
+		expectSend    bool
+	}{
+		{name: "tracing off", cfg: Config{TraceGossipReceive: true, TraceGossipSend: true}},
+		{name: "tracing on, switches off", cfg: Config{TracingEnabled: true}},
+		{name: "receive only", cfg: Config{TracingEnabled: true, TraceGossipReceive: true}, expectReceive: true},
+		{name: "send only", cfg: Config{TracingEnabled: true, TraceGossipSend: true}, expectSend: true},
+		{name: "both", cfg: Config{TracingEnabled: true, TraceGossipReceive: true, TraceGossipSend: true}, expectReceive: true, expectSend: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			meter := gossipSwitchTestMeter(t, tc.cfg)
+			if got := GossipReceiveTracingEnabled(meter); got != tc.expectReceive {
+				t.Fatalf("receive: got %v, want %v", got, tc.expectReceive)
+			}
+			if got := GossipSendTracingEnabled(meter); got != tc.expectSend {
+				t.Fatalf("send: got %v, want %v", got, tc.expectSend)
+			}
+			// A sub-meter shares the parent's configuration.
+			sub := meter.SubMeter("mempool")
+			if got := GossipReceiveTracingEnabled(sub); got != tc.expectReceive {
+				t.Fatalf("sub-meter receive: got %v, want %v", got, tc.expectReceive)
+			}
+			if got := GossipSendTracingEnabled(sub); got != tc.expectSend {
+				t.Fatalf("sub-meter send: got %v, want %v", got, tc.expectSend)
+			}
+		})
+	}
+}
+
+func TestGossipTracingSwitchesOffForNilAndCustomMeters(t *testing.T) {
+	t.Parallel()
+	type customMeter struct{ Meter }
+	for name, meter := range map[string]Meter{"nil": NewNilMeter(), "custom": customMeter{}} {
+		if GossipReceiveTracingEnabled(meter) || GossipSendTracingEnabled(meter) {
+			t.Fatalf("%s meter should keep gossip tracing disabled", name)
+		}
+	}
+}
+
 func TestTransactionTracingUnsupportedCustomMeter(t *testing.T) {
 	t.Parallel()
 	// Embedding preserves compatibility with existing custom Meter wrappers.
