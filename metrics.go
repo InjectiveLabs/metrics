@@ -20,6 +20,7 @@ type Metrics struct {
 
 	meterProvider  *sdkmetric.MeterProvider
 	tracerProvider *sdktrace.TracerProvider
+	traceExport    *traceExportCounters // nil when tracing is off
 
 	disabled bool
 }
@@ -130,9 +131,15 @@ func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error
 	}
 
 	if ms.cfg.TracingEnabled {
-		ms.tracerProvider, err = newTracerProvider(&cfg, resourceAttributes...)
+		ms.traceExport = &traceExportCounters{}
+		ms.tracerProvider, err = newTracerProvider(&cfg, ms.traceExport, resourceAttributes...)
 		if err != nil {
 			return nil, fmt.Errorf("can't create TracerProvider: %w", err)
+		}
+		if ms.cfg.MetricsEnabled {
+			if err := ms.registerTraceExportMetrics(); err != nil {
+				return nil, fmt.Errorf("can't register trace export metrics: %w", err)
+			}
 		}
 	}
 

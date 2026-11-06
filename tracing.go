@@ -20,7 +20,7 @@ type ContextPointer interface {
 	ContextPtr() *context.Context
 }
 
-func newTracerProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdktrace.TracerProvider, error) {
+func newTracerProvider(cfg *Config, counters *traceExportCounters, resourceAttributes ...TagAttribute) (*sdktrace.TracerProvider, error) {
 	ctx := context.Background()
 
 	// Reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS from environment
@@ -46,12 +46,20 @@ func newTracerProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdktra
 		return nil, fmt.Errorf("new resource failed: %w", err)
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-	)
+	return newTracerProviderWithExporter(exporter, res, counters, cfg.batchOptions()...), nil
+}
 
-	return tp, nil
+// batchOptions returns the batcher settings the configuration sets; the
+// rest stay at the SDK's defaults or environment values.
+func (cfg *Config) batchOptions() []sdktrace.BatchSpanProcessorOption {
+	var options []sdktrace.BatchSpanProcessorOption
+	if cfg.TraceQueueSize > 0 {
+		options = append(options, sdktrace.WithMaxQueueSize(cfg.TraceQueueSize))
+	}
+	if cfg.TraceBatchSize > 0 {
+		options = append(options, sdktrace.WithMaxExportBatchSize(cfg.TraceBatchSize))
+	}
+	return options
 }
 
 // FuncTiming reports function call and execution time in ms.
