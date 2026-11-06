@@ -137,3 +137,32 @@ func TestTraceExportMetricsObserveCounters(t *testing.T) {
 		}
 	}
 }
+
+// The configured queue size reaches the batcher: a queue of one drops under
+// a blocked receiver, where the default of 2048 would hold every span.
+func TestTraceQueueSizeConfigLimitsQueue(t *testing.T) {
+	t.Parallel()
+	exporter := &blockingExporter{release: make(chan struct{})}
+	cfg := Config{TraceQueueSize: 1, TraceBatchSize: 1}
+	counters := &traceExportCounters{}
+	provider := newTracerProviderWithExporter(exporter, resource.Empty(), counters,
+		append(cfg.batchOptions(), sdktrace.WithBatchTimeout(time.Hour))...)
+	endSpans(provider, 10)
+	close(exporter.release)
+	if err := provider.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if stats := counters.stats(); stats.Exported >= stats.Ended {
+		t.Fatalf("expected drops with a queue of one: %+v", stats)
+	}
+}
+
+func TestTraceBatchOptionsUnsetLeaveDefaults(t *testing.T) {
+	t.Parallel()
+	if options := (&Config{}).batchOptions(); len(options) != 0 {
+		t.Fatalf("expected no options, got %d", len(options))
+	}
+	if options := (&Config{TraceQueueSize: 4096, TraceBatchSize: 1024}).batchOptions(); len(options) != 2 {
+		t.Fatalf("expected two options, got %d", len(options))
+	}
+}

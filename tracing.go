@@ -46,7 +46,20 @@ func newTracerProvider(cfg *Config, counters *traceExportCounters, resourceAttri
 		return nil, fmt.Errorf("new resource failed: %w", err)
 	}
 
-	return newTracerProviderWithExporter(exporter, res, counters), nil
+	return newTracerProviderWithExporter(exporter, res, counters, cfg.batchOptions()...), nil
+}
+
+// batchOptions returns the batcher settings the configuration sets; the
+// rest stay at the SDK's defaults or environment values.
+func (cfg *Config) batchOptions() []sdktrace.BatchSpanProcessorOption {
+	var options []sdktrace.BatchSpanProcessorOption
+	if cfg.TraceQueueSize > 0 {
+		options = append(options, sdktrace.WithMaxQueueSize(cfg.TraceQueueSize))
+	}
+	if cfg.TraceBatchSize > 0 {
+		options = append(options, sdktrace.WithMaxExportBatchSize(cfg.TraceBatchSize))
+	}
+	return options
 }
 
 // FuncTiming reports function call and execution time in ms.
