@@ -20,7 +20,7 @@ type ContextPointer interface {
 	ContextPtr() *context.Context
 }
 
-func newTracerProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdktrace.TracerProvider, error) {
+func newTracerProvider(cfg *Config, counters *traceExportCounters, resourceAttributes ...TagAttribute) (*sdktrace.TracerProvider, error) {
 	ctx := context.Background()
 
 	// Reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS from environment
@@ -46,12 +46,7 @@ func newTracerProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdktra
 		return nil, fmt.Errorf("new resource failed: %w", err)
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-	)
-
-	return tp, nil
+	return newTracerProviderWithExporter(exporter, res, counters), nil
 }
 
 // FuncTiming reports function call and execution time in ms.
