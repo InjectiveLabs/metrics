@@ -242,6 +242,46 @@ func TestTransactionHashChangesWithTransactionBytes(t *testing.T) {
 	}
 }
 
+func TestTransactionTraceContextHashesOnceForSeveralSpans(t *testing.T) {
+	t.Parallel()
+	meter, exporter, _ := transactionTestMeter(t, true)
+	ctx := TransactionTraceContext(context.Background(), meter, []byte("hashed once"))
+	_, first := StartTransactionSpan(ctx, meter, nil, "first")
+	first.End()
+	_, second := StartTransactionSpan(ctx, meter, nil, "second")
+	second.End()
+	_, replaced := StartTransactionSpan(ctx, meter, []byte("other"), "replaced")
+	replaced.End()
+
+	spans := exporter.GetSpans()
+	if len(spans) != 3 {
+		t.Fatalf("expected 3 spans, got %d", len(spans))
+	}
+	for _, span := range spans[:2] {
+		if got := transactionTestAttributes(span)["tx_hash"].AsString(); got != transactionTestHash([]byte("hashed once")) {
+			t.Fatalf("span %q did not inherit the context hash: %q", span.Name, got)
+		}
+	}
+	if got := transactionTestAttributes(spans[2])["tx_hash"].AsString(); got != transactionTestHash([]byte("other")) {
+		t.Fatalf("transaction bytes did not replace the context hash: %q", got)
+	}
+}
+
+func TestTransactionTraceContextDisabledReturnsContextUnchanged(t *testing.T) {
+	t.Parallel()
+	disabledMeter, _, _ := transactionTestMeter(t, false)
+	type requestValueKey struct{}
+	ctx := context.WithValue(context.Background(), requestValueKey{}, "request")
+	for name, meter := range map[string]Meter{"disabled": disabledMeter, "nil": NewNilMeter(), "none": nil} {
+		if got := TransactionTraceContext(ctx, meter, []byte("transaction")); got != ctx {
+			t.Fatalf("%s meter: context was changed", name)
+		}
+	}
+	if got := TransactionTraceContext(nil, disabledMeter, []byte("transaction")); got == nil { //nolint:staticcheck // nil ctx is the case under test
+		t.Fatal("nil context must be replaced")
+	}
+}
+
 func gossipSwitchTestMeter(t *testing.T, cfg Config) Meter {
 	t.Helper()
 	providers := &Metrics{

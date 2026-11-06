@@ -115,16 +115,8 @@ func startTransactionSpan(ctx context.Context, meter Meter, transaction []byte, 
 		return ctx, inertTransactionSpan
 	}
 
-	metadata, _ := ctx.Value(transactionTraceKey{}).(transactionTraceMetadata)
 	if transaction != nil {
-		hash := sha256.Sum256(transaction)
-		const hexadecimal = "0123456789ABCDEF"
-		var encodedHash [sha256.Size * 2]byte
-		for index, value := range hash {
-			encodedHash[index*2], encodedHash[index*2+1] = hexadecimal[value>>4], hexadecimal[value&15]
-		}
-		metadata.hash = string(encodedHash[:])
-		ctx = context.WithValue(ctx, transactionTraceKey{}, metadata)
+		ctx = withTransactionHash(ctx, transaction)
 	}
 	attributes := transactionSpanAttributes(ctx, meter, tags)
 	attributes = append(attributes, attribute.String("tx_stage", name))
@@ -133,6 +125,33 @@ func startTransactionSpan(ctx context.Context, meter Meter, transaction []byte, 
 		options = append(options, trace.WithTimestamp(observedAt))
 	}
 	return tracer.Start(ctx, name, options...)
+}
+
+// TransactionTraceContext returns ctx carrying the canonical uppercase SHA256
+// tx_hash of transaction, for callers that start several spans for one
+// transaction: hash once here, then start the spans with nil transaction
+// bytes. A span started with transaction bytes replaces the hash. With
+// tracing disabled, ctx is returned as is, without hashing.
+func TransactionTraceContext(ctx context.Context, meter Meter, transaction []byte) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !TransactionTracingEnabled(meter) {
+		return ctx
+	}
+	return withTransactionHash(ctx, transaction)
+}
+
+func withTransactionHash(ctx context.Context, transaction []byte) context.Context {
+	metadata, _ := ctx.Value(transactionTraceKey{}).(transactionTraceMetadata)
+	hash := sha256.Sum256(transaction)
+	const hexadecimal = "0123456789ABCDEF"
+	var encodedHash [sha256.Size * 2]byte
+	for index, value := range hash {
+		encodedHash[index*2], encodedHash[index*2+1] = hexadecimal[value>>4], hexadecimal[value&15]
+	}
+	metadata.hash = string(encodedHash[:])
+	return context.WithValue(ctx, transactionTraceKey{}, metadata)
 }
 
 func transactionSpanAttributes(ctx context.Context, instrument Meter, tags []TagAttribute) []attribute.KeyValue {
