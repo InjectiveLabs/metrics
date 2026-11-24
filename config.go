@@ -23,6 +23,15 @@ type Config struct {
 	TraceQueueSize int `mapstructure:"trace-queue-size"` // spans held for export before new ones are dropped
 	TraceBatchSize int `mapstructure:"trace-batch-size"` // spans per export request, at most the queue size
 
+	// Functions FuncTiming and FuncTimingCtx ignore completely: no call
+	// counter, no span, no timing histogram, no error report. Meant for
+	// functions that run for a few microseconds many times per transaction,
+	// where the instrumentation costs more than the function. An entry is a
+	// function name as passed to FuncTiming, "GetParams", which applies to
+	// every scope, or "scope.Function", "bank.GetBalance", which applies to
+	// the meter with that scope name only.
+	FuncTimingSkip []string `mapstructure:"func-timing-skip"`
+
 	// time after which block is considered slow and flight recorder should dump the profile to disk.
 	// 0 - disables flight recorder.
 	FlightRecorderThreshold time.Duration `mapstructure:"flight-recorder-threshold"`

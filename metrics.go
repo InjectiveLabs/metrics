@@ -99,6 +99,10 @@ type meter struct {
 	histograms sync.Map // string => Int64Histogram
 
 	tracer trace.Tracer
+
+	// skipFuncs holds the function names FuncTiming ignores in this scope,
+	// see Config.FuncTimingSkip. Read-only after the meter is created.
+	skipFuncs map[string]struct{}
 }
 
 // StopFn is a callback meant to be called via defer and is used to record function end times.
@@ -193,9 +197,10 @@ func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttribute) (Meter, 
 	}
 
 	m = &meter{
-		name:     scopeName,
-		metrics:  ms,
-		baseTags: baseTags,
+		name:      scopeName,
+		metrics:   ms,
+		baseTags:  baseTags,
+		skipFuncs: funcSkipSet(scopeName, ms.cfg.FuncTimingSkip),
 	}
 
 	if ms.cfg.MetricsEnabled {
@@ -242,6 +247,8 @@ func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
 		metrics:  m.metrics,
 		baseTags: mergedBaseTags,
 		tracer:   m.tracer, // we re-use parent's tracer to have correct nested spans down from the root span
+
+		skipFuncs: funcSkipSet(subScopeName, m.metrics.cfg.FuncTimingSkip),
 	}
 
 	if m.metrics.cfg.MetricsEnabled {
