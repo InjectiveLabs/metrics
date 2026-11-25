@@ -23,6 +23,14 @@ type Config struct {
 	TraceQueueSize int `mapstructure:"trace-queue-size"` // spans held for export before new ones are dropped
 	TraceBatchSize int `mapstructure:"trace-batch-size"` // spans per export request, at most the queue size
 
+	// Deferred telemetry. FuncTiming, transaction spans and transaction
+	// events hand a small record to a queue and worker goroutines build the
+	// spans and metrics, so the calling goroutine pays for a clock read and
+	// one allocation only. A record that finds the queue full is dropped and
+	// counted, see TelemetryQueueStats.
+	TelemetryQueueSize int `mapstructure:"telemetry-queue-size"` // records held for the workers; 0 is the default, 262144; negative builds telemetry on the calling goroutine
+	TelemetryWorkers   int `mapstructure:"telemetry-workers"`    // worker goroutines; 0 is a quarter of the cores, between 2 and 8
+
 	// time after which block is considered slow and flight recorder should dump the profile to disk.
 	// 0 - disables flight recorder.
 	FlightRecorderThreshold time.Duration `mapstructure:"flight-recorder-threshold"`

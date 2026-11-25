@@ -21,6 +21,7 @@ type Metrics struct {
 	meterProvider  *sdkmetric.MeterProvider
 	tracerProvider *sdktrace.TracerProvider
 	traceExport    *traceExportCounters // nil when tracing is off
+	deferred       *deferredPipeline    // nil when telemetry is built on the calling goroutine
 
 	disabled bool
 }
@@ -99,6 +100,10 @@ type meter struct {
 	histograms sync.Map // string => Int64Histogram
 
 	tracer trace.Tracer
+
+	// funcOpts caches the metric attribute set of each function timed
+	// without tags: string => *funcMetricOptions.
+	funcOpts sync.Map
 }
 
 // StopFn is a callback meant to be called via defer and is used to record function end times.
@@ -140,6 +145,13 @@ func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error
 			if err := ms.registerTraceExportMetrics(); err != nil {
 				return nil, fmt.Errorf("can't register trace export metrics: %w", err)
 			}
+		}
+	}
+
+	ms.deferred = newDeferredPipeline(&ms.cfg)
+	if ms.deferred != nil && ms.cfg.MetricsEnabled {
+		if err := ms.registerTelemetryQueueMetrics(); err != nil {
+			return nil, fmt.Errorf("can't register telemetry queue metrics: %w", err)
 		}
 	}
 
@@ -214,6 +226,10 @@ func NewNilMeter() Meter {
 }
 
 func (ms *Metrics) Shutdown() error {
+	if ms.deferred != nil {
+		// The workers finish the queue while the providers still export.
+		ms.deferred.close()
+	}
 	if ms.cfg.MetricsEnabled {
 		if err := ms.meterProvider.Shutdown(context.Background()); err != nil {
 			return fmt.Errorf("can't shutdown MeterProvider: %w", err)
@@ -282,7 +298,7 @@ func (m *meter) getHistogram(name string) (metric.Int64Histogram, error) {
 		if err != nil {
 			return nil, fmt.Errorf("can't create Int64Histogram for Meter: %w", err)
 		}
-		h, _ = m.gauges.LoadOrStore(name, newH)
+		h, _ = m.histograms.LoadOrStore(name, newH)
 	}
 	return h.(metric.Int64Histogram), nil
 }

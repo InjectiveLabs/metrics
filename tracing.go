@@ -77,7 +77,7 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) 
 	}
 
 	ctxPtr := ctx.ContextPtr()
-	spanCtx, stop := m.FuncTimingCtx(*ctxPtr, fn, tags...)
+	spanCtx, stop := m.funcTiming(*ctxPtr, fn, tags)
 	*ctxPtr = spanCtx
 
 	return stop
@@ -101,6 +101,85 @@ func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribu
 		return ctx, noopStopFn
 	}
 
+	return m.funcTiming(ctx, fn, tags)
+}
+
+// funcTiming hands the call to the deferred pipeline when there is one, and
+// otherwise builds the span and the metrics on the calling goroutine.
+func (m *meter) funcTiming(ctx context.Context, fn string, tags []TagAttribute) (context.Context, StopFn) {
+	if pipeline := m.metrics.deferred; pipeline != nil && len(tags) <= maxDeferredTags {
+		if spanCtx, stop := pipeline.startFunc(ctx, m, fn, tags); stop != nil {
+			return spanCtx, stop
+		}
+	}
+	return m.funcTimingInline(ctx, fn, tags)
+}
+
+// startFunc starts a deferred FuncTiming call: it reads the clock, picks the
+// span ID and allocates the record. Everything else happens on a worker
+// after the stop function ran. It returns a nil StopFn for a call the
+// pipeline does not take: one that starts a trace while the sampler may
+// reject traces.
+func (pipeline *deferredPipeline) startFunc(ctx context.Context, m *meter, fn string, tags []TagAttribute) (context.Context, StopFn) {
+	span := &deferredSpan{m: m, name: fn}
+	span.setTags(tags)
+
+	if m.tracer != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if !span.inherit(ctx) {
+			if !pipeline.deferRoots {
+				return ctx, nil
+			}
+			span.traceID = randomTraceID()
+		}
+		span.spanID = randomSpanID()
+		span.parent = ctx
+		ctx = span.asContext(ctx)
+	}
+
+	if timeout := m.metrics.cfg.StuckFuncTimeout; timeout > 0 {
+		span.kind |= kindWatchdog
+		span.extras().done = make(chan struct{})
+		span.start = monotonicNow() // the watchdog reads it
+		go span.watchStuck(timeout)
+		return ctx, span.stop
+	}
+
+	span.start = monotonicNow()
+	return ctx, span.stop
+}
+
+// watchStuck is the deferred counterpart of the watchdog in
+// funcTimingInline: it ends the span of a function that runs longer than
+// timeout, marked as stuck.
+func (span *deferredSpan) watchStuck(timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-span.extra.done:
+		return
+	case <-timer.C:
+	}
+
+	m, fn, tags := span.m, span.name, span.tagSlice()
+	d := time.Duration(monotonicNow() - span.start)
+
+	if span.IsRecording() {
+		err := fmt.Errorf("detected stuck function: %s stuck for %v", fn, d)
+		span.RecordError(err, trace.WithStackTrace(true))
+		span.SetAttributes(attribute.String("exception.type", "stuck"))
+		span.SetStatus(codes.Error, "stuck")
+		span.End()
+	}
+
+	m.Histogram("func.timing.timeout", d.Milliseconds(), append([]TagAttribute{Tag("func_name", fn)}, tags...)...) //nolint:errcheck
+}
+
+// funcTimingInline is FuncTimingCtx without the deferred pipeline.
+func (m *meter) funcTimingInline(ctx context.Context, fn string, tags []TagAttribute) (context.Context, StopFn) {
 	m.Func(fn, tags...)
 	start := time.Now()
 

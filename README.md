@@ -99,6 +99,38 @@ defer appMeter.FuncTiming(&sdkCtx, "EndBlocker", metrics.TraceTag("block_height"
 exchangeMeter := appMeter.SubMeter("exchange")
 ```
 
+## Deferred telemetry
+
+`FuncTiming`, `FuncTimingCtx`, `StartTransactionSpan` and `RecordTransactionEvent`
+do only what must happen on the calling goroutine: read the clock, pick the
+span ID and put one record on a queue. Worker goroutines build the
+OpenTelemetry spans and the `func.called`, `func.timing` and `func.error`
+updates from the records. The exported spans and metrics are the ones the
+calling goroutine would have produced: same identifiers, parents, timestamps,
+attributes and instruments.
+
+| Config key | Meaning |
+|---|---|
+| `telemetry-queue-size` | records held for the workers, rounded up to a power of two. `0` is the default, 262144. A negative value turns the queue off: spans and metrics are built on the calling goroutine. |
+| `telemetry-workers` | worker goroutines. `0` is a quarter of the cores, between 2 and 8. |
+
+What to know:
+
+- A record that finds the queue full is dropped and counted; the caller never
+  waits. A dropped record loses its span and its func metrics.
+  `Metrics.TelemetryQueueStats()` returns the counters, and with metrics
+  enabled they are exported as `telemetry.records.enqueued`, `.processed`,
+  `.dropped` and `.failed`.
+- `func.called` is counted when the function returns, not when it starts.
+- The tags of a call and the bytes given to `RecordTransactionEvent` are read
+  by a worker after the call returned, so they must not be changed afterwards.
+  The text of a returned error is also read by the worker.
+- `FlushTraces` and `Shutdown` process the queue before they export.
+- The first span of a trace is deferred only while the SDK samples every
+  trace (`OTEL_TRACES_SAMPLER` unset, `always_on` or `parentbased_always_on`).
+  With another sampler it starts in the SDK, on the calling goroutine, and the
+  spans below it follow its decision.
+
 ## Trace Flight Recorder package
 
 It is implemented via new FlightRecorder in go (code). Can be enabled via `--trace-recorder-threshold N` flag, where N is a number of seconds after which block execution time is considered slow and trace will be saved to disk. It works by continuously recording the trace for the last N seconds, and after we detect slow block, we flush the whole trace to disk (to cwd folder). Each block execution time is also marked by the Task with block height in it’s name, so you can focus on specific blocks. To view the trace, find the interesting trace-XXXXXX.out file in root folder ("trace-%s-%s-%d.out", tagName, tagValue, start.Unix()) and from you local machine run:

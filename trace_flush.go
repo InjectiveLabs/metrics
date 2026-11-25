@@ -8,8 +8,8 @@ type traceFlusher interface {
 	FlushTraces(ctx context.Context) error
 }
 
-// FlushTraces exports every ended span still queued in the batch processor
-// and waits for the exporter's verdict, bounded by ctx. It exists for code
+// FlushTraces exports every ended span still in the telemetry queue or
+// queued in the batch processor and waits for the exporter's verdict, bounded by ctx. It exists for code
 // that is about to take the process down: a goroutine that recovers a panic
 // can label its span, end it, flush, and re-panic, so the span that describes
 // the crash is not lost with the queue. The batch processor keeps running
@@ -25,6 +25,12 @@ func (m *meter) FlushTraces(ctx context.Context) error {
 func (ms *Metrics) FlushTraces(ctx context.Context) error {
 	if ms == nil || ms.disabled || !ms.cfg.TracingEnabled {
 		return nil
+	}
+	if ms.deferred != nil {
+		// Spans still in the telemetry queue come first.
+		if err := ms.deferred.flush(ctx); err != nil {
+			return err
+		}
 	}
 	return ms.tracerProvider.ForceFlush(ctx)
 }

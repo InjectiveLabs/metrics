@@ -96,8 +96,86 @@ func RecordTransactionEvent(ctx context.Context, meter Meter, transaction []byte
 	if observedAt.IsZero() {
 		observedAt = time.Now()
 	}
+	if recordDeferredTransactionEvent(ctx, meter, transaction, name, observedAt, tags) {
+		return
+	}
 	_, span := startTransactionSpan(ctx, meter, transaction, name, observedAt, tags...)
 	span.End(trace.WithTimestamp(observedAt))
+}
+
+// deferredTransactionMeter returns the library meter behind instrument when
+// its transaction spans go through the deferred pipeline.
+func deferredTransactionMeter(instrument Meter, tags []TagAttribute) *meter {
+	scoped, supported := instrument.(*meter)
+	if !supported || scoped.TransactionTracer() == nil || scoped.metrics.deferred == nil || len(tags) > maxDeferredTags {
+		return nil
+	}
+	return scoped
+}
+
+// recordDeferredTransactionEvent queues a point observation: the worker
+// hashes the transaction and builds the zero-duration span. The transaction
+// bytes are kept until then and must not change, which holds for the
+// immutable transactions of a block or a mempool. It reports false when the
+// event has to be recorded on the calling goroutine.
+func recordDeferredTransactionEvent(ctx context.Context, instrument Meter, transaction []byte, name string, observedAt time.Time, tags []TagAttribute) bool {
+	scoped := deferredTransactionMeter(instrument, tags)
+	if scoped == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	span := &deferredSpan{m: scoped, name: name, parent: ctx, kind: kindTransactionStage}
+	span.setTags(tags)
+	if !span.inherit(ctx) {
+		if !scoped.metrics.deferred.deferRoots {
+			return false
+		}
+		span.traceID = randomTraceID()
+	}
+	if span.kind&kindSampled == 0 {
+		return true // the trace is not recorded
+	}
+	span.spanID = randomSpanID()
+	span.extra = &spanExtra{startTime: observedAt, endTime: observedAt, transaction: transaction}
+	span.state.Store(spanEnded)
+	scoped.metrics.deferred.enqueue(span)
+	return true
+}
+
+// startDeferredTransactionSpan starts a transaction span whose SDK span a
+// worker builds after End. It returns a nil span when the span has to start
+// on the calling goroutine.
+func startDeferredTransactionSpan(ctx context.Context, instrument Meter, transaction []byte, name string, observedAt time.Time, tags []TagAttribute) (context.Context, trace.Span) {
+	scoped := deferredTransactionMeter(instrument, tags)
+	if scoped == nil {
+		return ctx, nil
+	}
+
+	span := &deferredSpan{m: scoped, name: name, kind: kindTransactionStage}
+	span.setTags(tags)
+	if !span.inherit(ctx) {
+		if !scoped.metrics.deferred.deferRoots {
+			return ctx, nil
+		}
+		span.traceID = randomTraceID()
+	}
+	span.spanID = randomSpanID()
+
+	// The returned context carries the hash for the spans below this one,
+	// so it is computed here.
+	if transaction != nil {
+		ctx = withTransactionHash(ctx, transaction)
+	}
+	span.parent = ctx
+	if observedAt.IsZero() {
+		span.start = monotonicNow()
+	} else {
+		span.extras().startTime = observedAt
+	}
+	return span.asContext(ctx), span
 }
 
 func startTransactionSpan(ctx context.Context, meter Meter, transaction []byte, name string, observedAt time.Time, tags ...TagAttribute) (context.Context, trace.Span) {
@@ -113,6 +191,10 @@ func startTransactionSpan(ctx context.Context, meter Meter, transaction []byte, 
 		// Preserve context for other enabled components. Callers must mutate
 		// the returned span, not a potentially recording incoming parent.
 		return ctx, inertTransactionSpan
+	}
+
+	if deferredCtx, span := startDeferredTransactionSpan(ctx, meter, transaction, name, observedAt, tags); span != nil {
+		return deferredCtx, span
 	}
 
 	if transaction != nil {
