@@ -22,6 +22,7 @@ type Metrics struct {
 	tracerProvider *sdktrace.TracerProvider
 	traceExport    *traceExportCounters // nil when tracing is off
 	deferred       *deferredPipeline    // nil when telemetry is built on the calling goroutine
+	sampleLimit    uint64               // see transactionSampleLimit; set once, before any meter exists
 
 	disabled bool
 }
@@ -101,6 +102,10 @@ type meter struct {
 
 	tracer trace.Tracer
 
+	// skipFuncs holds the function names FuncTiming ignores in this scope,
+	// see Config.FuncTimingSkip. Read-only after the meter is created.
+	skipFuncs map[string]struct{}
+
 	// funcOpts caches the metric attribute set of each function timed
 	// without tags: string => *funcMetricOptions.
 	funcOpts sync.Map
@@ -118,7 +123,8 @@ func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error
 	cfg.setDefaults()
 
 	ms := &Metrics{
-		cfg: cfg,
+		cfg:         cfg,
+		sampleLimit: transactionSampleLimit(cfg.TraceSampleRate),
 	}
 
 	if ms.cfg.Endpoint == "" || (!ms.cfg.MetricsEnabled && !ms.cfg.TracingEnabled) {
@@ -205,9 +211,10 @@ func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttribute) (Meter, 
 	}
 
 	m = &meter{
-		name:     scopeName,
-		metrics:  ms,
-		baseTags: baseTags,
+		name:      scopeName,
+		metrics:   ms,
+		baseTags:  baseTags,
+		skipFuncs: funcSkipSet(scopeName, ms.cfg.FuncTimingSkip),
 	}
 
 	if ms.cfg.MetricsEnabled {
@@ -258,6 +265,8 @@ func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
 		metrics:  m.metrics,
 		baseTags: mergedBaseTags,
 		tracer:   m.tracer, // we re-use parent's tracer to have correct nested spans down from the root span
+
+		skipFuncs: funcSkipSet(subScopeName, m.metrics.cfg.FuncTimingSkip),
 	}
 
 	if m.metrics.cfg.MetricsEnabled {

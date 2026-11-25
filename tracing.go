@@ -72,7 +72,7 @@ func (cfg *Config) batchOptions() []sdktrace.BatchSpanProcessorOption {
 // This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 // using ContextPtr() method
 func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) StopFn {
-	if m == nil {
+	if m == nil || m.skipsFuncTiming(fn) {
 		return noopStopFn
 	}
 
@@ -97,7 +97,7 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) 
 //
 // WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
 func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribute) (context.Context, StopFn) {
-	if m == nil {
+	if m == nil || m.skipsFuncTiming(fn) {
 		return ctx, noopStopFn
 	}
 

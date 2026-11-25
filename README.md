@@ -131,6 +131,33 @@ What to know:
   With another sampler it starts in the SDK, on the calling goroutine, and the
   spans below it follow its decision.
 
+## Transaction trace sampling
+
+`trace-sample-rate = N` traces one transaction in N and leaves no spans for
+the others. `0` and `1` trace every transaction.
+
+- The choice comes from the transaction's SHA256 hash: a transaction is
+  traced when the first eight bytes of the hash, read as a big-endian number,
+  are at most 2^64/N. Nodes with the same N therefore trace the same
+  transactions, and a traced transaction is traced at every stage.
+- `StartTransactionSpan`, `RecordTransactionEvent` and
+  `TransactionTraceContext` apply it when they are given the transaction
+  bytes. For a transaction outside the sample they return a context that is
+  marked, and no span started with that context, by these functions or by
+  `FuncTiming`, is recorded.
+- Code that times a transaction with `FuncTiming` only calls
+  `SampleTransactionContext` with the hash first:
+  ```go
+  txCtx = metrics.SampleTransactionContext(txCtx, meter, txHash)
+  ```
+  The context must be the transaction's own, or the mark reaches the
+  transactions after it.
+- Spans that are not below a transaction, those of a block for instance, are
+  always recorded.
+- Metrics are not sampled. `func.called`, `func.timing` and `func.error`
+  stay exact: a call inside an untraced transaction still hands its record to
+  the deferred queue, without a span to build.
+
 ## Trace Flight Recorder package
 
 It is implemented via new FlightRecorder in go (code). Can be enabled via `--trace-recorder-threshold N` flag, where N is a number of seconds after which block execution time is considered slow and trace will be saved to disk. It works by continuously recording the trace for the last N seconds, and after we detect slow block, we flush the whole trace to disk (to cwd folder). Each block execution time is also marked by the Task with block height in it’s name, so you can focus on specific blocks. To view the trace, find the interesting trace-XXXXXX.out file in root folder ("trace-%s-%s-%d.out", tagName, tagValue, start.Unix()) and from you local machine run:

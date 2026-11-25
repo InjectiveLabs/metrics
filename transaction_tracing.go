@@ -82,6 +82,9 @@ func GossipSendTracingEnabled(meter Meter) bool {
 // The transaction hash is a correlation attribute, not an OpenTelemetry trace
 // ID. Independent nodes can join observations by chain ID and hash without
 // manufacturing a causal parent relationship across the P2P protocol.
+//
+// With Config.TraceSampleRate above 1, a transaction outside the sample gets
+// a span that records nothing and a context under which nothing is recorded.
 func StartTransactionSpan(ctx context.Context, meter Meter, transaction []byte, name string, tags ...TagAttribute) (context.Context, trace.Span) {
 	return startTransactionSpan(ctx, meter, transaction, name, time.Time{}, tags...)
 }
@@ -117,7 +120,8 @@ func deferredTransactionMeter(instrument Meter, tags []TagAttribute) *meter {
 // hashes the transaction and builds the zero-duration span. The transaction
 // bytes are kept until then and must not change, which holds for the
 // immutable transactions of a block or a mempool. It reports false when the
-// event has to be recorded on the calling goroutine.
+// event has to be recorded on the calling goroutine. With trace sampling the
+// worker also makes the choice, so the calling goroutine never hashes.
 func recordDeferredTransactionEvent(ctx context.Context, instrument Meter, transaction []byte, name string, observedAt time.Time, tags []TagAttribute) bool {
 	scoped := deferredTransactionMeter(instrument, tags)
 	if scoped == nil {
@@ -193,6 +197,11 @@ func startTransactionSpan(ctx context.Context, meter Meter, transaction []byte, 
 		return ctx, inertTransactionSpan
 	}
 
+	ctx, transaction, sampled := sampleTransaction(ctx, meter, transaction)
+	if !sampled {
+		return ctx, inertTransactionSpan
+	}
+
 	if deferredCtx, span := startDeferredTransactionSpan(ctx, meter, transaction, name, observedAt, tags); span != nil {
 		return deferredCtx, span
 	}
@@ -213,7 +222,9 @@ func startTransactionSpan(ctx context.Context, meter Meter, transaction []byte, 
 // tx_hash of transaction, for callers that start several spans for one
 // transaction: hash once here, then start the spans with nil transaction
 // bytes. A span started with transaction bytes replaces the hash. With
-// tracing disabled, ctx is returned as is, without hashing.
+// tracing disabled, ctx is returned as is, without hashing. For a
+// transaction outside the trace sample the returned context is marked
+// instead, and the spans started with it are not recorded.
 func TransactionTraceContext(ctx context.Context, meter Meter, transaction []byte) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -221,12 +232,20 @@ func TransactionTraceContext(ctx context.Context, meter Meter, transaction []byt
 	if !TransactionTracingEnabled(meter) {
 		return ctx
 	}
+	ctx, transaction, sampled := sampleTransaction(ctx, meter, transaction)
+	if !sampled || transaction == nil {
+		return ctx
+	}
 	return withTransactionHash(ctx, transaction)
 }
 
 func withTransactionHash(ctx context.Context, transaction []byte) context.Context {
-	metadata, _ := ctx.Value(transactionTraceKey{}).(transactionTraceMetadata)
 	hash := sha256.Sum256(transaction)
+	return withTransactionHashSum(ctx, &hash)
+}
+
+func withTransactionHashSum(ctx context.Context, hash *[sha256.Size]byte) context.Context {
+	metadata, _ := ctx.Value(transactionTraceKey{}).(transactionTraceMetadata)
 	const hexadecimal = "0123456789ABCDEF"
 	var encodedHash [sha256.Size * 2]byte
 	for index, value := range hash {

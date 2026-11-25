@@ -38,7 +38,7 @@ func deferredTestProviders(t testing.TB, cfg Config, options ...sdktrace.TracerP
 		// Benchmarks bring their own exporter; this one keeps every span.
 		options = append(options, sdktrace.WithSyncer(setup.exporter))
 	}
-	setup.providers = &Metrics{cfg: cfg}
+	setup.providers = &Metrics{cfg: cfg, sampleLimit: transactionSampleLimit(cfg.TraceSampleRate)}
 	if cfg.MetricsEnabled {
 		setup.providers.meterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(setup.reader))
 	}

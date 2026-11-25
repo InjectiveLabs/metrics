@@ -16,6 +16,14 @@ type Config struct {
 	TraceGossipReceive bool `mapstructure:"trace-gossip-receive"` // record a span for every transaction received from a peer
 	TraceGossipSend    bool `mapstructure:"trace-gossip-send"`    // record spans for every transaction sent to a peer
 
+	// Transaction trace sampling: one transaction in TraceSampleRate is
+	// traced, through all its stages, and the others leave no spans. The
+	// choice comes from the transaction hash, so nodes with the same value
+	// trace the same transactions. Spans outside a transaction, those of a
+	// block for instance, and all metrics are not sampled. The default, 1,
+	// traces every transaction.
+	TraceSampleRate int `mapstructure:"trace-sample-rate"`
+
 	// Span batching. Spans ended while the queue is full are dropped, see
 	// TraceExportStats. 0 leaves the OpenTelemetry defaults in place, 2048
 	// and 512, or the OTEL_BSP_MAX_QUEUE_SIZE and
@@ -30,6 +38,15 @@ type Config struct {
 	// counted, see TelemetryQueueStats.
 	TelemetryQueueSize int `mapstructure:"telemetry-queue-size"` // records held for the workers; 0 is the default, 262144; negative builds telemetry on the calling goroutine
 	TelemetryWorkers   int `mapstructure:"telemetry-workers"`    // worker goroutines; 0 is a quarter of the cores, between 2 and 8
+
+	// Functions FuncTiming and FuncTimingCtx ignore completely: no call
+	// counter, no span, no timing histogram, no error report. Meant for
+	// functions that run for a few microseconds many times per transaction,
+	// where the instrumentation costs more than the function. An entry is a
+	// function name as passed to FuncTiming, "GetParams", which applies to
+	// every scope, or "scope.Function", "bank.GetBalance", which applies to
+	// the meter with that scope name only.
+	FuncTimingSkip []string `mapstructure:"func-timing-skip"`
 
 	// time after which block is considered slow and flight recorder should dump the profile to disk.
 	// 0 - disables flight recorder.
@@ -52,5 +69,8 @@ func (cfg *Config) setDefaults() {
 	}
 	if cfg.ExportInterval == 0 {
 		cfg.ExportInterval = defaultExportInterval
+	}
+	if cfg.TraceSampleRate < 1 {
+		cfg.TraceSampleRate = 1 // every transaction
 	}
 }

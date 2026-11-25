@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"runtime"
@@ -380,7 +381,11 @@ func (span *deferredSpan) emit(tags []TagAttribute, err error) {
 	name := span.name
 	if extra != nil {
 		if extra.transaction != nil {
-			valueCtx = withTransactionHash(valueCtx, extra.transaction)
+			hash := sha256.Sum256(extra.transaction)
+			if !transactionSampled(hash[:], scoped.transactionSampleLimit()) {
+				return // an event of a transaction outside the sample
+			}
+			valueCtx = withTransactionHashSum(valueCtx, &hash)
 		}
 		if !extra.startTime.IsZero() {
 			start = extra.startTime
