@@ -557,7 +557,7 @@ func (m *meter) recordFuncMetrics(fn string, tags []TagAttribute, err error, mil
 		return
 	}
 	if len(tags) > 0 {
-		m.Func(fn, tags...)
+		m.Func(constantName(fn), tags...)
 		if err != nil {
 			m.Error(fn, err, tags...)
 		}

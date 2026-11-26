@@ -168,7 +168,7 @@ func (funcSkipDiscardExporter) ExportSpans(context.Context, []sdktrace.ReadOnlyS
 func (funcSkipDiscardExporter) Shutdown(context.Context) error { return nil }
 
 //go:noinline
-func funcSkipBenchmarkCall(meter Meter, ctx *funcSkipTestContext, fn string) {
+func funcSkipBenchmarkCall(meter Meter, ctx *funcSkipTestContext, fn constantName) {
 	saved := ctx.ctx
 	defer meter.FuncTiming(ctx, fn)()
 	ctx.ctx = saved
@@ -178,7 +178,7 @@ func funcSkipBenchmarkCall(meter Meter, ctx *funcSkipTestContext, fn string) {
 // when the function is timed, when it is on the skip list, and when the
 // meter is disabled.
 func BenchmarkFuncTiming(b *testing.B) {
-	run := func(b *testing.B, meter Meter, fn string) {
+	run := func(b *testing.B, meter Meter, fn constantName) {
 		ctx := &funcSkipTestContext{ctx: context.Background()}
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -216,7 +216,7 @@ func TestFuncTimingSkipSurvivesWithTraceTags(t *testing.T) {
 	meter, _ := funcSkipTestMeter(t, []string{"CheckTxApp", "app.Scoped"}, sdktrace.WithSyncer(exporter))
 	decorated := WithTraceTags(meter, TraceTag("node_id", "node"))
 
-	for _, name := range []string{"CheckTxApp", "Scoped", "Timed"} {
+	for _, name := range []constantName{"CheckTxApp", "Scoped", "Timed"} {
 		_, stop := decorated.FuncTimingCtx(context.Background(), name)
 		stop()
 	}

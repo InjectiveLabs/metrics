@@ -71,7 +71,8 @@ func (cfg *Config) batchOptions() []sdktrace.BatchSpanProcessorOption {
 //
 // This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 // using ContextPtr() method
-func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) StopFn {
+func (m *meter) FuncTiming(ctx ContextPointer, constantArg constantName, tags ...TagAttribute) StopFn {
+	fn := string(constantArg)
 	if m == nil || m.skipsFuncTiming(fn) {
 		return noopStopFn
 	}
@@ -96,7 +97,8 @@ func (m *meter) FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) 
 // defer stop(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 //
 // WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
-func (m *meter) FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribute) (context.Context, StopFn) {
+func (m *meter) FuncTimingCtx(ctx context.Context, constantArg constantName, tags ...TagAttribute) (context.Context, StopFn) {
+	fn := string(constantArg)
 	if m == nil || m.skipsFuncTiming(fn) {
 		return ctx, noopStopFn
 	}
@@ -180,7 +182,7 @@ func (span *deferredSpan) watchStuck(timeout time.Duration) {
 
 // funcTimingInline is FuncTimingCtx without the deferred pipeline.
 func (m *meter) funcTimingInline(ctx context.Context, fn string, tags []TagAttribute) (context.Context, StopFn) {
-	m.Func(fn, tags...)
+	m.Func(constantName(fn), tags...)
 	start := time.Now()
 
 	var (
@@ -232,7 +234,7 @@ func (m *meter) funcTimingInline(ctx context.Context, fn string, tags []TagAttri
 		}
 
 		if err != nil {
-			m.FuncError(ctx, fn, err, tags...)
+			m.FuncError(ctx, constantName(fn), err, tags...)
 		} else if span != nil && span.IsRecording() {
 			span.SetStatus(codes.Ok, "")
 			span.End()
@@ -243,7 +245,8 @@ func (m *meter) funcTimingInline(ctx context.Context, fn string, tags []TagAttri
 }
 
 // FuncError reports fn error metric and also sets current span in context (if present) to Error status with description err.Error()
-func (m *meter) FuncError(ctx context.Context, fn string, err error, tags ...TagAttribute) {
+func (m *meter) FuncError(ctx context.Context, constantArg constantName, err error, tags ...TagAttribute) {
+	fn := string(constantArg)
 	if m == nil {
 		return
 	}

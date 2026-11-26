@@ -831,7 +831,7 @@ func (deferredDiscardExporter) Shutdown(context.Context) error { return nil }
 // deferredBenchmarkCall makes one instrumented call the way a keeper does.
 //
 //go:noinline
-func deferredBenchmarkCall(meter Meter, ctx *deferredTestContext, fn string) {
+func deferredBenchmarkCall(meter Meter, ctx *deferredTestContext, fn constantName) {
 	saved := ctx.ctx
 	defer meter.FuncTiming(ctx, fn)()
 	ctx.ctx = saved
