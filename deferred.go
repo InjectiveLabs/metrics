@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -128,8 +129,17 @@ func (queue *spanQueue) push(span *deferredSpan) bool {
 
 // pop returns nil when the queue is empty.
 func (queue *spanQueue) pop() *deferredSpan {
+	return queue.popBefore(math.MaxUint64)
+}
+
+// popBefore is pop for the records at positions below limit only: it returns
+// nil when the next record is at limit or after it.
+func (queue *spanQueue) popBefore(limit uint64) *deferredSpan {
 	position := queue.head.Load()
 	for {
+		if position >= limit {
+			return nil
+		}
 		cell := &queue.cells[position&queue.mask]
 		difference := int64(cell.sequence.Load() - (position + 1)) //nolint:gosec // wraps on purpose
 		switch {
@@ -182,6 +192,14 @@ type deferredPipeline struct {
 	stop    chan struct{}
 	workers sync.WaitGroup
 
+	// consumers are the workers' ends of the queue; helper is the end used
+	// by a flush or by close, one at a time under helperLock. A flush reads
+	// them to learn whether a record from before it is still being
+	// processed.
+	consumers  []*queueConsumer
+	helper     queueConsumer
+	helperLock sync.Mutex
+
 	_         cacheLinePad
 	processed atomic.Uint64
 	failed    atomic.Uint64
@@ -215,10 +233,28 @@ func newDeferredPipeline(cfg *Config) *deferredPipeline {
 		stop:       make(chan struct{}),
 	}
 	for range cfg.telemetryWorkers() {
+		consumer := &queueConsumer{}
+		pipeline.consumers = append(pipeline.consumers, consumer)
 		pipeline.workers.Add(1)
-		go pipeline.work()
+		go pipeline.work(consumer)
 	}
 	return pipeline
+}
+
+// queueConsumer is one goroutine's end of the queue. While the goroutine
+// takes and processes a record, holding is one more than a position at or
+// before that record's; zero means it holds nothing. It is set before the
+// record is taken, so a record that left the queue is always covered.
+type queueConsumer struct {
+	holding atomic.Uint64
+	_       cacheLinePad
+}
+
+// holdsBefore reports whether the consumer may hold a record from a
+// position below target.
+func (consumer *queueConsumer) holdsBefore(target uint64) bool {
+	holding := consumer.holding.Load()
+	return holding != 0 && holding-1 < target
 }
 
 // rootSpansAlwaysSampled reports whether the SDK's sampler, which the
@@ -265,7 +301,7 @@ func (ms *Metrics) TelemetryQueueStats() TelemetryQueueStats {
 // work drains the queue and sleeps when it is empty. The producers never
 // wake a worker: a wake-up is a system call on the calling goroutine's
 // thread, and it would put the worker on the caller's processor.
-func (pipeline *deferredPipeline) work() {
+func (pipeline *deferredPipeline) work(consumer *queueConsumer) {
 	defer pipeline.workers.Done()
 
 	idle := workerMinIdle
@@ -274,7 +310,7 @@ func (pipeline *deferredPipeline) work() {
 	clockChecked := time.Now()
 
 	for {
-		if pipeline.drain() > 0 {
+		if pipeline.drain(context.Background(), consumer, math.MaxUint64) > 0 {
 			idle = workerMinIdle
 		} else if idle < workerMaxIdle {
 			idle *= 2
@@ -293,33 +329,69 @@ func (pipeline *deferredPipeline) work() {
 	}
 }
 
-// drain processes records until the queue is empty and returns how many.
-func (pipeline *deferredPipeline) drain() int {
+// drain processes the records at positions below limit until none is left
+// or ctx ends, and returns how many. consumer is the caller's end of the
+// queue.
+func (pipeline *deferredPipeline) drain(ctx context.Context, consumer *queueConsumer, limit uint64) int {
 	count := 0
-	for span := pipeline.queue.pop(); span != nil; span = pipeline.queue.pop() {
+	for ctx.Err() == nil {
+		// The record taken next is at the current head or after it.
+		consumer.holding.Store(pipeline.queue.head.Load() + 1)
+		span := pipeline.queue.popBefore(limit)
+		if span == nil {
+			break
+		}
 		pipeline.process(span)
 		count++
 	}
+	consumer.holding.Store(0)
 	return count
 }
 
 // flush returns once every record enqueued before the call has been
-// processed, by the workers or by the caller, or when ctx ends.
+// processed, by the workers or by the caller, or when ctx ends. Records
+// enqueued after the call are left to the workers, so that a busy node
+// cannot keep a flush going.
 func (pipeline *deferredPipeline) flush(ctx context.Context) error {
 	target := pipeline.queue.tail.Load()
 	for {
-		pipeline.drain()
-		if pipeline.processed.Load() >= target {
+		// One flush at a time helps the workers; another one only waits.
+		if pipeline.helperLock.TryLock() {
+			pipeline.drain(ctx, &pipeline.helper, target)
+			pipeline.helperLock.Unlock()
+		}
+		if pipeline.processedBefore(target) {
 			return nil
 		}
-		// A worker holds the remaining records, or a producer has claimed
-		// a position and not filled it yet.
+		// A consumer holds one of the records, or a producer has claimed a
+		// position and not filled it yet.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(50 * time.Microsecond):
 		}
 	}
+}
+
+// processedBefore reports whether every record at a position below target
+// has been processed: all of them left the queue and no consumer holds one.
+// The count of processed records cannot tell, since records from after
+// target are counted too while one from before it is still in a worker's
+// hands. The head is read first: a record below target that left the queue
+// before that read is covered by its consumer's holding until it is done.
+func (pipeline *deferredPipeline) processedBefore(target uint64) bool {
+	if pipeline.queue.head.Load() < target {
+		return false
+	}
+	if pipeline.helper.holdsBefore(target) {
+		return false
+	}
+	for _, consumer := range pipeline.consumers {
+		if consumer.holdsBefore(target) {
+			return false
+		}
+	}
+	return true
 }
 
 // close stops the workers and processes what is left in the queue. Records
@@ -330,7 +402,9 @@ func (pipeline *deferredPipeline) close() {
 	}
 	close(pipeline.stop)
 	pipeline.workers.Wait()
-	pipeline.drain()
+	pipeline.helperLock.Lock()
+	pipeline.drain(context.Background(), &pipeline.helper, math.MaxUint64)
+	pipeline.helperLock.Unlock()
 }
 
 // process builds the span and the metric updates of one record. A panic,

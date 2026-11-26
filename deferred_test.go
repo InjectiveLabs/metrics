@@ -836,3 +836,105 @@ func deferredBenchmarkCall(meter Meter, ctx *deferredTestContext, fn string) {
 	defer meter.FuncTiming(ctx, fn)()
 	ctx.ctx = saved
 }
+
+// A flush is bounded by what was in the queue when it started: records that
+// keep arriving do not hold it, and it never outlives its context.
+func TestDeferredFlushIsBoundedByItsStartAndItsContext(t *testing.T) {
+	setup := deferredTestProviders(t, deferredTestConfig(-1))
+	// No workers: the flush has to do the work itself.
+	pipeline := &deferredPipeline{queue: newSpanQueue(1 << 12), deferRoots: true, stop: make(chan struct{})}
+	setup.providers.deferred = pipeline
+	holder := &deferredTestContext{ctx: context.Background()}
+
+	// With an ended context nothing is processed.
+	for range 100 {
+		deferredBenchmarkCall(setup.meter, holder, "Queued")
+	}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := pipeline.flush(ended); err != context.Canceled {
+		t.Fatalf("flush with an ended context returned %v", err)
+	}
+	if processed := pipeline.processed.Load(); processed != 0 {
+		t.Fatalf("flush with an ended context processed %d records", processed)
+	}
+
+	// A producer that never stops must not keep the flush going.
+	stop := make(chan struct{})
+	produced := make(chan struct{})
+	go func() {
+		defer close(produced)
+		producer := &deferredTestContext{ctx: context.Background()}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				deferredBenchmarkCall(setup.meter, producer, "Arriving")
+			}
+		}
+	}()
+	flushed := make(chan error, 1)
+	go func() { flushed <- pipeline.flush(context.Background()) }()
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("flush returned %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("flush does not return while records keep arriving")
+	}
+	close(stop)
+	<-produced
+	if processed := pipeline.processed.Load(); processed < 100 {
+		t.Fatalf("flush returned after %d of the 100 records queued before it", processed)
+	}
+}
+
+// A flush waits for a record from before it that a worker still holds, even
+// when enough later records were processed to make up the count.
+func TestDeferredFlushWaitsForRecordsHeldByAWorker(t *testing.T) {
+	setup := deferredTestProviders(t, deferredTestConfig(-1))
+	worker := &queueConsumer{}
+	pipeline := &deferredPipeline{
+		queue: newSpanQueue(64), deferRoots: true, stop: make(chan struct{}),
+		consumers: []*queueConsumer{worker},
+	}
+	setup.providers.deferred = pipeline
+	holder := &deferredTestContext{ctx: context.Background()}
+
+	// Two records before the flush; the worker takes the first one and is
+	// slow with it.
+	deferredBenchmarkCall(setup.meter, holder, "Held")
+	deferredBenchmarkCall(setup.meter, holder, "Queued")
+	worker.holding.Store(pipeline.queue.head.Load() + 1)
+	held := pipeline.queue.pop()
+
+	flushed := make(chan error, 1)
+	go func() { flushed <- pipeline.flush(context.Background()) }()
+	// A record from after the start of the flush: it is not the flush's.
+	for pipeline.processed.Load() < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	deferredBenchmarkCall(setup.meter, holder, "Later")
+
+	select {
+	case err := <-flushed:
+		t.Fatalf("flush returned %v while a worker holds a record from before it", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if head := pipeline.queue.head.Load(); head != 2 {
+		t.Fatalf("the flush took records up to position %d, its own end at 2", head)
+	}
+
+	pipeline.process(held)
+	worker.holding.Store(0)
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("flush returned %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("flush does not return after the worker finished")
+	}
+}

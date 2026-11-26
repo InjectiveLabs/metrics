@@ -126,6 +126,9 @@ What to know:
   by a worker after the call returned, so they must not be changed afterwards.
   The text of a returned error is also read by the worker.
 - `FlushTraces` and `Shutdown` process the queue before they export.
+  `FlushTraces` waits for the records queued before the call only, and not
+  beyond its context: records that arrive during the flush are left to the
+  workers.
 - The first span of a trace is deferred only while the SDK samples every
   trace (`OTEL_TRACES_SAMPLER` unset, `always_on` or `parentbased_always_on`).
   With another sampler it starts in the SDK, on the calling goroutine, and the
