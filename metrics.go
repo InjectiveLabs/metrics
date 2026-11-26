@@ -3,8 +3,11 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
+	"sync/atomic"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -21,6 +24,12 @@ type Metrics struct {
 	meterProvider  *sdkmetric.MeterProvider
 	tracerProvider *sdktrace.TracerProvider
 	traceExport    *traceExportCounters // nil when tracing is off
+	deferred       *deferredPipeline    // nil when telemetry is built on the calling goroutine
+	sampleLimit    uint64               // see transactionSampleLimit; set once, before any meter exists
+
+	// skipSets caches the FuncTiming skip set of each scope:
+	// string => map[string]struct{}, see funcSkipSet.
+	skipSets sync.Map
 
 	disabled bool
 }
@@ -37,23 +46,23 @@ type Meter interface {
 
 	// SubMeter creates a new Meter derived from current MEter instance.
 	// Scope name and base tags of sub-meter are then concatenated with parent's ones.
-	SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
+	SubMeter(subScopeName constantName, subBaseTags ...TagAttribute) Meter
 
 	// Count adds an int64 to existing (or new) counter with the name.
 	// Appends tags to Meter baseTags to submit them with the counter new value.
-	Count(name string, numToAdd int64, tags ...TagAttribute) error
+	Count(name constantName, numToAdd int64, tags ...TagAttribute) error
 
 	// Gauge records new gauge int64 reading.
 	// Appends tags to Meter baseTags to submit them with the gauge new value.
-	Gauge(name string, value int64, tags ...TagAttribute) error
+	Gauge(name constantName, value int64, tags ...TagAttribute) error
 
 	// Histogram records new value into set of values distributed over time, e.g. timer value in ms.
 	// Appends tags to Meter baseTags to submit them with the gauge new value.
-	Histogram(name string, value int64, tags ...TagAttribute) error
+	Histogram(name constantName, value int64, tags ...TagAttribute) error
 
 	// Func inrements number of times function was called as "func.called" counter.
 	// Function name is stored in "func_name" tag.
-	Func(fn string, tags ...TagAttribute)
+	Func(fn constantName, tags ...TagAttribute)
 
 	// FuncTiming reports function call and execution time in ms.
 	// Fucntion name is stored as "func_name" tag.
@@ -64,7 +73,7 @@ type Meter interface {
 	//
 	// This function overwrites the context.COntext inside of ctx with a copy with attached tracing span value
 	// using ContextPtr() method
-	FuncTiming(ctx ContextPointer, fn string, tags ...TagAttribute) StopFn
+	FuncTiming(ctx ContextPointer, fn constantName, tags ...TagAttribute) StopFn
 
 	// FuncTimingCtx reports function call and execution time in ms.
 	// Fucntion name is stored as "func_name" tag.
@@ -79,10 +88,10 @@ type Meter interface {
 	// defer stop(&err) // err <- here is a named ("err") returned error value of an enclosing fn
 	//
 	// WARNING: DO NOT USE IT FOR sdk.Context wrapped as context.Context, use FuncTiming() instead
-	FuncTimingCtx(ctx context.Context, fn string, tags ...TagAttribute) (context.Context, StopFn)
+	FuncTimingCtx(ctx context.Context, fn constantName, tags ...TagAttribute) (context.Context, StopFn)
 
 	// FuncError reports fn error metric and also sets current span in context (if present) to Error status with description err.Error()
-	FuncError(ctx context.Context, fn string, err error, tags ...TagAttribute)
+	FuncError(ctx context.Context, fn constantName, err error, tags ...TagAttribute)
 }
 
 var _ Meter = (*meter)(nil)
@@ -99,7 +108,26 @@ type meter struct {
 	histograms sync.Map // string => Int64Histogram
 
 	tracer trace.Tracer
+
+	// skipFuncs holds the function names FuncTiming ignores in this scope,
+	// see Config.FuncTimingSkip. Read-only after the meter is created.
+	skipFuncs map[string]struct{}
+
+	// subMeters holds the sub-meter kept for each scope name, see
+	// subMeterEntry. Readers load the map and never write it; a writer
+	// replaces it under subMetersLock.
+	subMeters     atomic.Pointer[map[string]*subMeterEntry]
+	subMetersLock sync.Mutex
+
+	// funcOpts caches the metric attribute set of each function timed
+	// without tags: string => *funcMetricOptions.
+	funcOpts sync.Map
 }
+
+// Scope, function and instrument names must be constants: each distinct name
+// is kept for the life of the process, so a name built at runtime would grow
+// memory without bound.
+type constantName string
 
 // StopFn is a callback meant to be called via defer and is used to record function end times.
 // Optional error argument is for convinience to handle error returned from a function and mark it as failed
@@ -111,9 +139,13 @@ var noopStopFn StopFn = func(...*error) {}
 // Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
 func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error) {
 	cfg.setDefaults()
+	// The skip sets are built from this list once per scope and kept, so the
+	// list must not change with the caller's slice afterwards.
+	cfg.FuncTimingSkip = slices.Clone(cfg.FuncTimingSkip)
 
 	ms := &Metrics{
-		cfg: cfg,
+		cfg:         cfg,
+		sampleLimit: transactionSampleLimit(cfg.TraceSampleRate),
 	}
 
 	if ms.cfg.Endpoint == "" || (!ms.cfg.MetricsEnabled && !ms.cfg.TracingEnabled) {
@@ -140,6 +172,13 @@ func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error
 			if err := ms.registerTraceExportMetrics(); err != nil {
 				return nil, fmt.Errorf("can't register trace export metrics: %w", err)
 			}
+		}
+	}
+
+	ms.deferred = newDeferredPipeline(&ms.cfg)
+	if ms.deferred != nil && ms.cfg.MetricsEnabled {
+		if err := ms.registerTelemetryQueueMetrics(); err != nil {
+			return nil, fmt.Errorf("can't register telemetry queue metrics: %w", err)
 		}
 	}
 
@@ -185,7 +224,8 @@ func newMeterProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdkmetr
 }
 
 // NewMeter return a new meter instance, that has a defined unique scope and is used to provide metrics
-func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttribute) (Meter, error) {
+func (ms *Metrics) NewMeter(constantScope constantName, baseTags ...TagAttribute) (Meter, error) {
+	scopeName := string(constantScope)
 	var m *meter
 
 	if ms.disabled {
@@ -193,9 +233,12 @@ func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttribute) (Meter, 
 	}
 
 	m = &meter{
-		name:     scopeName,
-		metrics:  ms,
-		baseTags: baseTags,
+		name:    scopeName,
+		metrics: ms,
+		// A copy: kept sub-meters carry these tags, so they must not change
+		// with the caller's slice afterwards.
+		baseTags:  slices.Clone(baseTags),
+		skipFuncs: ms.funcSkipSet(scopeName),
 	}
 
 	if ms.cfg.MetricsEnabled {
@@ -214,6 +257,10 @@ func NewNilMeter() Meter {
 }
 
 func (ms *Metrics) Shutdown() error {
+	if ms.deferred != nil {
+		// The workers finish the queue while the providers still export.
+		ms.deferred.close()
+	}
 	if ms.cfg.MetricsEnabled {
 		if err := ms.meterProvider.Shutdown(context.Background()); err != nil {
 			return fmt.Errorf("can't shutdown MeterProvider: %w", err)
@@ -230,11 +277,70 @@ func (ms *Metrics) Shutdown() error {
 
 // SubMeter creates a new Meter derived from current MEter instance.
 // Scope name and base tags of sub-meter are then concatenated with parent's ones.
-func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter {
+//
+// The sub-meter of a scope is created once per parent and returned again by
+// later calls with the same base tags, see subMeterEntry.
+func (m *meter) SubMeter(constantScope constantName, subBaseTags ...TagAttribute) Meter {
 	if m == nil {
 		return NewNilMeter()
 	}
+	subScopeName := string(constantScope)
 
+	if known := m.subMeters.Load(); known != nil {
+		if entry, found := (*known)[subScopeName]; found {
+			if sameBaseTags(entry.tags, subBaseTags) {
+				return entry.meter
+			}
+			// Another set of tags for a scope that has its sub-meter: built
+			// for this call and not kept.
+			return m.newSubMeter(subScopeName, subBaseTags)
+		}
+	}
+
+	subMeter := m.newSubMeter(subScopeName, subBaseTags)
+	if !sameBaseTags(subBaseTags, subBaseTags) {
+		return subMeter // tags that cannot be compared: nothing to find it by
+	}
+
+	m.subMetersLock.Lock()
+	defer m.subMetersLock.Unlock()
+
+	var known map[string]*subMeterEntry
+	if current := m.subMeters.Load(); current != nil {
+		known = *current
+	}
+	if entry, found := known[subScopeName]; found {
+		// Another goroutine was first.
+		if sameBaseTags(entry.tags, subBaseTags) {
+			return entry.meter
+		}
+		return subMeter
+	}
+	// The map a reader holds is never written: a new one replaces it.
+	extended := make(map[string]*subMeterEntry, len(known)+1)
+	for scope, entry := range known {
+		extended[scope] = entry
+	}
+	extended[subScopeName] = &subMeterEntry{tags: slices.Clone(subBaseTags), meter: subMeter}
+	m.subMeters.Store(&extended)
+
+	return subMeter
+}
+
+// subMeterEntry is the sub-meter a parent keeps for a scope, with the base
+// tags it was created with. Keeping it makes SubMeter cheap for callers that
+// ask on every timed call, and lets them share the instrument caches.
+//
+// What the kept sub-meter depends on cannot change afterwards: the parent's
+// name, tags and tracer are set at creation, the scope name is a constant and
+// the tags given here are compared on every call. So an entry is never
+// replaced or removed, and there is one per scope name per parent.
+type subMeterEntry struct {
+	tags  []TagAttribute
+	meter *meter
+}
+
+func (m *meter) newSubMeter(subScopeName string, subBaseTags []TagAttribute) *meter {
 	mergedBaseTags := append(append([]TagAttribute{}, m.baseTags...), subBaseTags...)
 
 	subMeter := &meter{
@@ -242,6 +348,8 @@ func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
 		metrics:  m.metrics,
 		baseTags: mergedBaseTags,
 		tracer:   m.tracer, // we re-use parent's tracer to have correct nested spans down from the root span
+
+		skipFuncs: m.metrics.funcSkipSet(subScopeName),
 	}
 
 	if m.metrics.cfg.MetricsEnabled {
@@ -249,6 +357,61 @@ func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
 	}
 
 	return subMeter
+}
+
+// sameBaseTags reports whether two tag lists are the same tags in the same
+// order. Only the library's tag types with a string, integer or boolean
+// value, what Tag, TraceTag and MetricTag produce, are compared; anything else counts as different, also from
+// itself, so that a sub-meter with such tags is never taken for another.
+func sameBaseTags(a, b []TagAttribute) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for index := range a {
+		var left, right attribute.KeyValue
+		switch tag := a[index].(type) {
+		case TagAttr:
+			other, sameKind := b[index].(TagAttr)
+			if !sameKind {
+				return false
+			}
+			left, right = attribute.KeyValue(tag), attribute.KeyValue(other)
+		case TagAttrTrace:
+			other, sameKind := b[index].(TagAttrTrace)
+			if !sameKind {
+				return false
+			}
+			left, right = attribute.KeyValue(tag), attribute.KeyValue(other)
+		case TagAttrMetric:
+			other, sameKind := b[index].(TagAttrMetric)
+			if !sameKind {
+				return false
+			}
+			left, right = attribute.KeyValue(tag), attribute.KeyValue(other)
+		default:
+			return false
+		}
+		if left.Key != right.Key || left.Value.Type() != right.Value.Type() {
+			return false
+		}
+		switch left.Value.Type() {
+		case attribute.STRING:
+			if left.Value.AsString() != right.Value.AsString() {
+				return false
+			}
+		case attribute.INT64:
+			if left.Value.AsInt64() != right.Value.AsInt64() {
+				return false
+			}
+		case attribute.BOOL:
+			if left.Value.AsBool() != right.Value.AsBool() {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (m *meter) getCounter(name string) (metric.Int64Counter, error) {
@@ -282,14 +445,15 @@ func (m *meter) getHistogram(name string) (metric.Int64Histogram, error) {
 		if err != nil {
 			return nil, fmt.Errorf("can't create Int64Histogram for Meter: %w", err)
 		}
-		h, _ = m.gauges.LoadOrStore(name, newH)
+		h, _ = m.histograms.LoadOrStore(name, newH)
 	}
 	return h.(metric.Int64Histogram), nil
 }
 
 // Count adds an int64 to existing (or new) counter with the name.
 // Appends tags to Meter baseTags to submit them with the counter new value.
-func (m *meter) Count(name string, numToAdd int64, tags ...TagAttribute) error {
+func (m *meter) Count(constantArg constantName, numToAdd int64, tags ...TagAttribute) error {
+	name := string(constantArg)
 	if m == nil || m.Meter == nil {
 		return nil
 	}
@@ -306,7 +470,8 @@ func (m *meter) Count(name string, numToAdd int64, tags ...TagAttribute) error {
 
 // Gauge records new gauge int64 reading.
 // Appends tags to Meter baseTags to submit them with the gauge new value.
-func (m *meter) Gauge(name string, value int64, tags ...TagAttribute) error {
+func (m *meter) Gauge(constantArg constantName, value int64, tags ...TagAttribute) error {
+	name := string(constantArg)
 	if m == nil || m.Meter == nil {
 		return nil
 	}
@@ -323,7 +488,8 @@ func (m *meter) Gauge(name string, value int64, tags ...TagAttribute) error {
 
 // Histogram records new value into set of values distributed over time, e.g. timer value in ms.
 // Appends tags to Meter baseTags to submit them with the histogram new value.
-func (m *meter) Histogram(name string, value int64, tags ...TagAttribute) error {
+func (m *meter) Histogram(constantArg constantName, value int64, tags ...TagAttribute) error {
+	name := string(constantArg)
 	if m == nil || m.Meter == nil {
 		return nil
 	}
@@ -340,7 +506,8 @@ func (m *meter) Histogram(name string, value int64, tags ...TagAttribute) error 
 
 // Func inrements number of times function was called as "func.called" counter.
 // Function name is stored in "func_name" tag.
-func (m *meter) Func(fn string, tags ...TagAttribute) {
+func (m *meter) Func(constantArg constantName, tags ...TagAttribute) {
+	fn := string(constantArg)
 	if m == nil || m.Meter == nil {
 		return
 	}

@@ -99,6 +99,88 @@ defer appMeter.FuncTiming(&sdkCtx, "EndBlocker", metrics.TraceTag("block_height"
 exchangeMeter := appMeter.SubMeter("exchange")
 ```
 
+## Deferred telemetry
+
+`FuncTiming`, `FuncTimingCtx`, `StartTransactionSpan` and `RecordTransactionEvent`
+do only what must happen on the calling goroutine: read the clock, pick the
+span ID and put one record on a queue. Worker goroutines build the
+OpenTelemetry spans and the `func.called`, `func.timing` and `func.error`
+updates from the records. The exported spans and metrics are the ones the
+calling goroutine would have produced: same identifiers, parents, timestamps,
+attributes and instruments.
+
+| Config key | Meaning |
+|---|---|
+| `telemetry-queue-size` | records held for the workers, rounded up to a power of two. `0` is the default, 262144. A negative value turns the queue off: spans and metrics are built on the calling goroutine. |
+| `telemetry-workers` | worker goroutines. `0` is a quarter of the cores, between 2 and 8. |
+
+What to know:
+
+- A record that finds the queue full is dropped and counted; the caller never
+  waits. A dropped record loses its span and its func metrics.
+  `Metrics.TelemetryQueueStats()` returns the counters, and with metrics
+  enabled they are exported as `telemetry.records.enqueued`, `.processed`,
+  `.dropped` and `.failed`.
+- `func.called` is counted when the function returns, not when it starts.
+- The tags of a call and the bytes given to `RecordTransactionEvent` are read
+  by a worker after the call returned, so they must not be changed afterwards.
+  The text of a returned error is also read by the worker.
+- `FlushTraces` and `Shutdown` process the queue before they export.
+  `FlushTraces` waits for the records queued before the call only, and not
+  beyond its context: records that arrive during the flush are left to the
+  workers.
+- The first span of a trace is deferred only while the SDK samples every
+  trace (`OTEL_TRACES_SAMPLER` unset, `always_on` or `parentbased_always_on`).
+  With another sampler it starts in the SDK, on the calling goroutine, and the
+  spans below it follow its decision.
+
+## Transaction trace sampling
+
+`trace-sample-rate = N` traces one transaction in N and leaves no spans for
+the others. `0` and `1` trace every transaction.
+
+- The choice comes from the transaction's SHA256 hash: a transaction is
+  traced when the first eight bytes of the hash, read as a big-endian number,
+  are at most 2^64/N. Nodes with the same N therefore trace the same
+  transactions, and a traced transaction is traced at every stage.
+- `StartTransactionSpan`, `RecordTransactionEvent` and
+  `TransactionTraceContext` apply it when they are given the transaction
+  bytes. For a transaction outside the sample they return a context that is
+  marked, and no span started with that context, by these functions or by
+  `FuncTiming`, is recorded.
+- Code that times a transaction with `FuncTiming` only calls
+  `SampleTransactionContext` with the hash first:
+  ```go
+  txCtx = metrics.SampleTransactionContext(txCtx, meter, txHash)
+  ```
+  The context must be the transaction's own, or the mark reaches the
+  transactions after it.
+- Spans that are not below a transaction, those of a block for instance, are
+  always recorded.
+- Metrics are not sampled. `func.called`, `func.timing` and `func.error`
+  stay exact: a call inside an untraced transaction still hands its record to
+  the deferred queue, without a span to build.
+
+## Skipping timed functions
+
+`func-timing-skip` lists functions that `FuncTiming` and `FuncTimingCtx`
+ignore: no call counter, no span, no timing histogram and no error report from
+the stop function. It is meant for functions that run for a few microseconds
+many times per transaction, where the instrumentation costs more than the
+function. The call sites keep their `FuncTiming` line; the list alone decides.
+
+```go
+metrics.Config{
+	FuncTimingSkip: []string{"bank.GetBalance", "GetParams"},
+}
+```
+
+- `"scope.Function"` applies to the meter with that scope name only: the name
+  given to `NewMeter` or `SubMeter`.
+- A bare function name applies to every scope.
+- The time of a skipped function stays visible in the spans of its callers.
+- An empty list times everything.
+
 ## Trace Flight Recorder package
 
 It is implemented via new FlightRecorder in go (code). Can be enabled via `--trace-recorder-threshold N` flag, where N is a number of seconds after which block execution time is considered slow and trace will be saved to disk. It works by continuously recording the trace for the last N seconds, and after we detect slow block, we flush the whole trace to disk (to cwd folder). Each block execution time is also marked by the Task with block height in it’s name, so you can focus on specific blocks. To view the trace, find the interesting trace-XXXXXX.out file in root folder ("trace-%s-%s-%d.out", tagName, tagValue, start.Unix()) and from you local machine run:
@@ -109,11 +191,12 @@ go tool trace trace-64240020.out
 ## Transaction tracing
 
 Transaction stage helpers use the existing meter's tracer and OTLP exporter.
-They are enabled by the existing `TracingEnabled` configuration. There is no
-additional transaction sampler in these helpers; scope the initial rollout and
-measure span volume before enabling instrumentation across a fleet. The shared
-OpenTelemetry provider controls recording and export. Disabled or unsupported
-meters do not hash transaction bytes.
+They are enabled by the existing `TracingEnabled` configuration. Span volume
+is limited with `trace-sample-rate`, see "Transaction trace sampling" above;
+without it every transaction is traced, so measure span volume before enabling
+instrumentation across a fleet. The shared OpenTelemetry provider controls
+recording and export. Disabled or unsupported meters do not hash transaction
+bytes.
 
 Export is best effort through the existing bounded batch queue. A full queue
 drops spans instead of blocking transaction processing, and exporter failures

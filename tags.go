@@ -71,6 +71,9 @@ func WithTraceTags(instrument Meter, tags ...TagAttrTrace) Meter {
 		metrics:  scoped.metrics,
 		tracer:   scoped.tracer,
 		baseTags: baseTags,
+		// The scope is the same, so the skipped functions are too. The set
+		// is read-only and can be shared.
+		skipFuncs: scoped.skipFuncs,
 	}
 }
 

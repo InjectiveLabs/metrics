@@ -94,6 +94,9 @@ func newTracerProviderWithExporter(
 	return sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(countingSpanProcessor{SpanProcessor: batcher, counters: counters}),
 		sdktrace.WithResource(res),
+		// Deferred spans are created by a worker with the identifiers
+		// their callers already handed out.
+		sdktrace.WithIDGenerator(presetIDGenerator{}),
 	)
 }
 
