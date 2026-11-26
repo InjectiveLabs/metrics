@@ -264,3 +264,49 @@ func BenchmarkFuncTimingUntracedTransaction(b *testing.B) {
 	}
 	setup.providers.deferred.closed.Store(true) // nothing to export at cleanup
 }
+
+// The choice must hold whatever sampler the SDK runs with: always_on and
+// traceidratio look at the trace ID only and would record a span below a
+// parent that is merely flagged as unsampled.
+func TestTransactionSamplingHoldsWithSamplersThatIgnoreTheParent(t *testing.T) {
+	const (
+		transactions = 200
+		rate         = 4
+	)
+	sampled := 0
+	for index := range transactions {
+		hash := sha256.Sum256(samplingTestTransaction(index))
+		if transactionSampled(hash[:], transactionSampleLimit(rate)) {
+			sampled++
+		}
+	}
+	samplers := map[string]sdktrace.Sampler{
+		"always_on":    sdktrace.AlwaysSample(),
+		"traceidratio": sdktrace.TraceIDRatioBased(1),
+	}
+	for samplerName, sampler := range samplers {
+		for path, queueSize := range map[string]int{"deferred": 0, "inline": -1} {
+			t.Run(samplerName+"/"+path, func(t *testing.T) {
+				setup := deferredTestProviders(t, samplingTestConfig(queueSize, rate), sdktrace.WithSampler(sampler))
+				samplingTestScenario(setup, transactions)
+				setup.flush(t)
+
+				counts := map[string]int{}
+				for _, span := range setup.exporter.GetSpans() {
+					counts[span.Name]++
+				}
+				for _, name := range []string{
+					"tx.mempool.check", "tx.mempool.update_lock_wait", "AnteHandle", "tx.mempool.removed",
+					"tx.gossip.enqueue", "tx.gossip.skipped", "tx.block.finalize_started", "runTx", "GetAccount",
+				} {
+					if counts[name] != sampled {
+						t.Errorf("%d %s spans, expected one per sampled transaction: %d", counts[name], name, sampled)
+					}
+				}
+				if counts["internalFinalizeBlock"] != 1 {
+					t.Errorf("%d internalFinalizeBlock spans, expected 1", counts["internalFinalizeBlock"])
+				}
+			})
+		}
+	}
+}

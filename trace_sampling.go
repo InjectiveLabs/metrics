@@ -20,9 +20,12 @@ import (
 // not sampled: calls made for an untraced transaction are still counted and
 // timed.
 //
-// A transaction outside the sample is marked by a span context without the
-// sampled flag in its context. The spans below it see an unsampled parent
-// and are not recorded, on the deferred and on the inline path alike.
+// A transaction outside the sample is marked twice in its context. The mark
+// proper is a value of the library, which the inline path checks before it
+// starts a span: it holds with every SDK sampler, including always_on and
+// traceidratio, which look at the trace ID only. The second is a span context
+// without the sampled flag, which the deferred path reads from the parent it
+// inherits anyway and which other OpenTelemetry code understands.
 
 // sampleEverything is the limit that every transaction is under.
 const sampleEverything = 0
@@ -69,10 +72,16 @@ func transactionSampled(hash []byte, limit uint64) bool {
 }
 
 // untracedContext returns ctx marked as belonging to a transaction outside
-// the sample. Under a traced parent, a block for instance, the mark keeps
-// the parent's identity and drops the sampled flag; without a parent it is
-// a new unsampled identity.
+// the sample. Under a traced parent, a block for instance, the span context
+// keeps the parent's identity and drops the sampled flag; without a parent it
+// is a new unsampled identity.
 func untracedContext(ctx context.Context) context.Context {
+	metadata, _ := ctx.Value(transactionTraceKey{}).(transactionTraceMetadata)
+	if !metadata.untraced {
+		metadata.untraced = true
+		ctx = context.WithValue(ctx, transactionTraceKey{}, metadata)
+	}
+
 	parent := trace.SpanContextFromContext(ctx)
 	switch {
 	case !parent.IsValid():
@@ -85,11 +94,11 @@ func untracedContext(ctx context.Context) context.Context {
 	return trace.ContextWithSpanContext(ctx, parent)
 }
 
-// underUntracedParent reports whether ctx is below a span that is not
-// recorded, which includes the mark of a transaction outside the sample.
-func underUntracedParent(ctx context.Context) bool {
-	parent := trace.SpanContextFromContext(ctx)
-	return parent.IsValid() && !parent.IsSampled()
+// transactionUntraced reports whether ctx carries the mark of a transaction
+// outside the sample.
+func transactionUntraced(ctx context.Context) bool {
+	metadata, _ := ctx.Value(transactionTraceKey{}).(transactionTraceMetadata)
+	return metadata.untraced
 }
 
 // SampleTransactionContext applies trace sampling to code that times a
@@ -120,7 +129,7 @@ func sampleTransaction(ctx context.Context, instrument Meter, transaction []byte
 	if limit == sampleEverything {
 		return ctx, transaction, true
 	}
-	if underUntracedParent(ctx) {
+	if transactionUntraced(ctx) {
 		return ctx, transaction, false
 	}
 	if transaction == nil {

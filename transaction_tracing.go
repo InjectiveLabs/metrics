@@ -15,6 +15,9 @@ type transactionTraceKey struct{}
 // does not retain transaction bytes, request values or application payloads.
 type transactionTraceMetadata struct {
 	hash string
+	// untraced marks a transaction outside the trace sample: no span is
+	// recorded with this context, whatever sampler the SDK runs with.
+	untraced bool
 }
 
 type transactionTracerProvider interface {

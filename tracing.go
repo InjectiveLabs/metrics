@@ -187,7 +187,9 @@ func (m *meter) funcTimingInline(ctx context.Context, fn string, tags []TagAttri
 		span trace.Span
 	)
 
-	if m.tracer != nil {
+	// A transaction outside the trace sample gets no span; the SDK's sampler
+	// is not asked, since it may ignore the unsampled parent.
+	if m.tracer != nil && !transactionUntraced(ctx) {
 		ctx, span = m.tracer.Start(ctx, fn, trace.WithAttributes(transactionSpanAttributes(ctx, m, tags)...))
 	}
 
