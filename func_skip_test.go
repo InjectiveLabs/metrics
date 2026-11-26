@@ -207,3 +207,23 @@ func BenchmarkFuncTiming(b *testing.B) {
 		run(b, NewNilMeter(), "GetBalance")
 	})
 }
+
+// A meter decorated with trace tags, as a node does with its root meter at
+// startup, keeps the skip rules of its scope.
+func TestFuncTimingSkipSurvivesWithTraceTags(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	meter, _ := funcSkipTestMeter(t, []string{"CheckTxApp", "app.Scoped"}, sdktrace.WithSyncer(exporter))
+	decorated := WithTraceTags(meter, TraceTag("node_id", "node"))
+
+	for _, name := range []string{"CheckTxApp", "Scoped", "Timed"} {
+		_, stop := decorated.FuncTimingCtx(context.Background(), name)
+		stop()
+	}
+	sub := decorated.SubMeter("bank")
+	_, stop := sub.FuncTimingCtx(context.Background(), "CheckTxApp")
+	stop()
+
+	if names := funcSkipTestSpanNames(exporter); !reflect.DeepEqual(names, []string{"Timed"}) {
+		t.Fatalf("spans of a decorated meter: %v, expected only Timed", names)
+	}
+}
