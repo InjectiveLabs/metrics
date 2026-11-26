@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -225,5 +226,94 @@ func TestFuncTimingSkipSurvivesWithTraceTags(t *testing.T) {
 
 	if names := funcSkipTestSpanNames(exporter); !reflect.DeepEqual(names, []string{"Timed"}) {
 		t.Fatalf("spans of a decorated meter: %v, expected only Timed", names)
+	}
+}
+
+// BenchmarkSubMeterWithSkipList measures a SubMeter call with a skip list the
+// size of a node's default: keepers whose meter cache does not survive a
+// value receiver create a sub-meter per call.
+func BenchmarkSubMeterWithSkipList(b *testing.B) {
+	skip := make([]string, 0, 40)
+	for index := range 40 {
+		skip = append(skip, "scope"+string(rune('a'+index%20))+".Function"+string(rune('A'+index%26)))
+	}
+	meter, _ := funcSkipTestMeter(b, skip, sdktrace.WithSyncer(tracetest.NewInMemoryExporter()))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = meter.SubMeter("bank", Tag("svc", "bank"))
+	}
+}
+
+// The skip sets are cached per scope. Nothing invalidates them, so the list
+// they come from must be fixed when the providers are created: a caller that
+// changes its slice afterwards changes nothing, for scopes seen before the
+// change and after it alike.
+func TestFuncTimingSkipListIsFixedAtCreation(t *testing.T) {
+	list := []string{"bank.GetBalance", "GetParams"}
+	providers, err := NewMetrics(Config{
+		Endpoint: "localhost:1", InsecureEndpoint: true, TracingEnabled: true, FuncTimingSkip: list,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providers.Shutdown() })
+
+	root, err := providers.NewMeter("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	early := root.SubMeter("bank").(*meter)
+	list[0], list[1] = "bank.SendCoins", "auth.GetAccount"
+	late := root.SubMeter("auth").(*meter)
+	again := root.SubMeter("bank").(*meter)
+
+	for name, scoped := range map[string]*meter{"before the change": early, "after it": again} {
+		if !scoped.skipsFuncTiming("GetBalance") || !scoped.skipsFuncTiming("GetParams") || scoped.skipsFuncTiming("SendCoins") {
+			t.Errorf("bank meter created %s does not follow the list given at creation", name)
+		}
+	}
+	if late.skipsFuncTiming("GetAccount") || !late.skipsFuncTiming("GetParams") {
+		t.Error("a scope first seen after the change follows the changed slice")
+	}
+}
+
+// Meters of one scope created from many goroutines get the same set, and
+// meters of different scopes get their own.
+func TestFuncTimingSkipSetsUnderConcurrentMeterCreation(t *testing.T) {
+	root, _ := funcSkipTestMeter(t, []string{"bank.GetBalance", "auth.GetAccount", "GetParams"}, sdktrace.WithSyncer(tracetest.NewInMemoryExporter()))
+
+	scopes := map[string][2]string{"bank": {"GetBalance", "GetAccount"}, "auth": {"GetAccount", "GetBalance"}}
+	failures := make(chan string, 64)
+	var group sync.WaitGroup
+	for range 8 {
+		for scope, functions := range scopes {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				for range 200 {
+					scoped := root.SubMeter(constantName(scope)).(*meter)
+					if !scoped.skipsFuncTiming(functions[0]) || scoped.skipsFuncTiming(functions[1]) || !scoped.skipsFuncTiming("GetParams") {
+						select {
+						case failures <- scope:
+						default:
+						}
+						return
+					}
+				}
+			}()
+		}
+	}
+	group.Wait()
+	close(failures)
+	for scope := range failures {
+		t.Errorf("a %s meter got another scope's skip set", scope)
+	}
+
+	// One cached set per scope, however many meters were created.
+	cached := 0
+	root.(*meter).metrics.skipSets.Range(func(_, _ any) bool { cached++; return true })
+	if cached != 3 { // app, bank, auth
+		t.Errorf("%d cached skip sets, expected 3", cached)
 	}
 }

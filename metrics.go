@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -24,6 +25,10 @@ type Metrics struct {
 	deferred       *deferredPipeline    // nil when telemetry is built on the calling goroutine
 	sampleLimit    uint64               // see transactionSampleLimit; set once, before any meter exists
 
+	// skipSets caches the FuncTiming skip set of each scope:
+	// string => map[string]struct{}, see funcSkipSet.
+	skipSets sync.Map
+
 	disabled bool
 }
 
@@ -39,7 +44,7 @@ type Meter interface {
 
 	// SubMeter creates a new Meter derived from current MEter instance.
 	// Scope name and base tags of sub-meter are then concatenated with parent's ones.
-	SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
+	SubMeter(subScopeName constantName, subBaseTags ...TagAttribute) Meter
 
 	// Count adds an int64 to existing (or new) counter with the name.
 	// Appends tags to Meter baseTags to submit them with the counter new value.
@@ -111,6 +116,10 @@ type meter struct {
 	funcOpts sync.Map
 }
 
+// Scope names must be constants: each distinct name is kept for the life of
+// the process, so a name built at runtime would grow memory without bound.
+type constantName string
+
 // StopFn is a callback meant to be called via defer and is used to record function end times.
 // Optional error argument is for convinience to handle error returned from a function and mark it as failed
 type StopFn func(...*error)
@@ -121,6 +130,9 @@ var noopStopFn StopFn = func(...*error) {}
 // Usually only one instance4 of Metrics per app is used, and multiple Meters per application scope.
 func NewMetrics(cfg Config, resourceAttributes ...TagAttribute) (*Metrics, error) {
 	cfg.setDefaults()
+	// The skip sets are built from this list once per scope and kept, so the
+	// list must not change with the caller's slice afterwards.
+	cfg.FuncTimingSkip = slices.Clone(cfg.FuncTimingSkip)
 
 	ms := &Metrics{
 		cfg:         cfg,
@@ -203,7 +215,8 @@ func newMeterProvider(cfg *Config, resourceAttributes ...TagAttribute) (*sdkmetr
 }
 
 // NewMeter return a new meter instance, that has a defined unique scope and is used to provide metrics
-func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttribute) (Meter, error) {
+func (ms *Metrics) NewMeter(constantScope constantName, baseTags ...TagAttribute) (Meter, error) {
+	scopeName := string(constantScope)
 	var m *meter
 
 	if ms.disabled {
@@ -214,7 +227,7 @@ func (ms *Metrics) NewMeter(scopeName string, baseTags ...TagAttribute) (Meter, 
 		name:      scopeName,
 		metrics:   ms,
 		baseTags:  baseTags,
-		skipFuncs: funcSkipSet(scopeName, ms.cfg.FuncTimingSkip),
+		skipFuncs: ms.funcSkipSet(scopeName),
 	}
 
 	if ms.cfg.MetricsEnabled {
@@ -253,7 +266,8 @@ func (ms *Metrics) Shutdown() error {
 
 // SubMeter creates a new Meter derived from current MEter instance.
 // Scope name and base tags of sub-meter are then concatenated with parent's ones.
-func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter {
+func (m *meter) SubMeter(constantScope constantName, subBaseTags ...TagAttribute) Meter {
+	subScopeName := string(constantScope)
 	if m == nil {
 		return NewNilMeter()
 	}
@@ -266,7 +280,7 @@ func (m *meter) SubMeter(subScopeName string, subBaseTags ...TagAttribute) Meter
 		baseTags: mergedBaseTags,
 		tracer:   m.tracer, // we re-use parent's tracer to have correct nested spans down from the root span
 
-		skipFuncs: funcSkipSet(subScopeName, m.metrics.cfg.FuncTimingSkip),
+		skipFuncs: m.metrics.funcSkipSet(subScopeName),
 	}
 
 	if m.metrics.cfg.MetricsEnabled {

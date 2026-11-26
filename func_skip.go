@@ -34,6 +34,21 @@ func funcSkipSet(scope string, entries []string) map[string]struct{} {
 	return set
 }
 
+// funcSkipSet returns the skip set of a scope, built on the first call for
+// that scope and shared by every meter of it afterwards: creating a meter
+// must stay cheap, since some callers create one per timed call. The sets
+// are read-only.
+func (ms *Metrics) funcSkipSet(scope string) map[string]struct{} {
+	if len(ms.cfg.FuncTimingSkip) == 0 {
+		return nil
+	}
+	if cached, found := ms.skipSets.Load(scope); found {
+		return cached.(map[string]struct{}) //nolint:errcheck,revive // only this function stores
+	}
+	cached, _ := ms.skipSets.LoadOrStore(scope, funcSkipSet(scope, ms.cfg.FuncTimingSkip))
+	return cached.(map[string]struct{}) //nolint:errcheck,revive // only this function stores
+}
+
 // skipsFuncTiming reports whether FuncTiming and FuncTimingCtx do nothing for
 // the function: no call counter, no span, no timing histogram, no error
 // report from the stop function.
