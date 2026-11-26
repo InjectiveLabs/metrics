@@ -158,6 +158,26 @@ the others. `0` and `1` trace every transaction.
   stay exact: a call inside an untraced transaction still hands its record to
   the deferred queue, without a span to build.
 
+## Skipping timed functions
+
+`func-timing-skip` lists functions that `FuncTiming` and `FuncTimingCtx`
+ignore: no call counter, no span, no timing histogram and no error report from
+the stop function. It is meant for functions that run for a few microseconds
+many times per transaction, where the instrumentation costs more than the
+function. The call sites keep their `FuncTiming` line; the list alone decides.
+
+```go
+metrics.Config{
+	FuncTimingSkip: []string{"bank.GetBalance", "GetParams"},
+}
+```
+
+- `"scope.Function"` applies to the meter with that scope name only: the name
+  given to `NewMeter` or `SubMeter`.
+- A bare function name applies to every scope.
+- The time of a skipped function stays visible in the spans of its callers.
+- An empty list times everything.
+
 ## Trace Flight Recorder package
 
 It is implemented via new FlightRecorder in go (code). Can be enabled via `--trace-recorder-threshold N` flag, where N is a number of seconds after which block execution time is considered slow and trace will be saved to disk. It works by continuously recording the trace for the last N seconds, and after we detect slow block, we flush the whole trace to disk (to cwd folder). Each block execution time is also marked by the Task with block height in it’s name, so you can focus on specific blocks. To view the trace, find the interesting trace-XXXXXX.out file in root folder ("trace-%s-%s-%d.out", tagName, tagValue, start.Unix()) and from you local machine run:
@@ -168,11 +188,12 @@ go tool trace trace-64240020.out
 ## Transaction tracing
 
 Transaction stage helpers use the existing meter's tracer and OTLP exporter.
-They are enabled by the existing `TracingEnabled` configuration. There is no
-additional transaction sampler in these helpers; scope the initial rollout and
-measure span volume before enabling instrumentation across a fleet. The shared
-OpenTelemetry provider controls recording and export. Disabled or unsupported
-meters do not hash transaction bytes.
+They are enabled by the existing `TracingEnabled` configuration. Span volume
+is limited with `trace-sample-rate`, see "Transaction trace sampling" above;
+without it every transaction is traced, so measure span volume before enabling
+instrumentation across a fleet. The shared OpenTelemetry provider controls
+recording and export. Disabled or unsupported meters do not hash transaction
+bytes.
 
 Export is best effort through the existing bounded batch queue. A full queue
 drops spans instead of blocking transaction processing, and exporter failures
